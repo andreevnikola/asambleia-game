@@ -313,6 +313,17 @@ export async function advance(action: AdvanceAction, qIndex: number | null) {
       ok = rows.length === 1;
       break;
     }
+    case "stop-presentation": {
+      // Back to the lobby board: the draw is thrown away (a new one can be made), while players,
+      // teams, questions and settings stay. `ver` is bumped so every phone drops its leader notice.
+      const rows = await s`WITH st AS (
+          UPDATE game SET stage = 'lobby', q_index = 0, timer_started_at = NULL, ver = ver + 1
+          WHERE id = 1 AND status = 'live' AND stage IN ('picking', 'results', 'presenting') RETURNING 1
+        ), da AS (DELETE FROM assignments WHERE EXISTS (SELECT 1 FROM st) RETURNING 1)
+        SELECT count(*)::int AS n FROM st`;
+      ok = rows[0].n === 1;
+      break;
+    }
     case "next": {
       if (qIndex === null) throw new ApiError(400, ERR.badJson);
       const rows = await s`UPDATE game SET q_index = q_index + 1, timer_started_at = now()

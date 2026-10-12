@@ -546,6 +546,287 @@ test("chaos: reloads, double clicks, network loss and a flaky admin tab", async 
   await api.post("advance", { action: "reset" });
 });
 
+// ───────────── 3b. the leader picker, the waiting ring and the skip buttons ─────────────
+
+test("picker: every drum has 7 names and stops exactly on the chosen leader; the waiting ring runs down to nothing", async ({ browser, request }) => {
+  test.setTimeout(120_000);
+  const api = new Admin(request);
+  await api.setup({ teams: ["А", "Б", "В", "Г", "Д", "Е"], questions: ["Първи въпрос?", "Втори въпрос?"], speak: 60, pause: 3, reveal: 1, scroll: 2 });
+  await api.ok("start", { simulate: true });
+  await api.ok("assign");
+  const draw = await api.state();
+  const q1 = draw.assignments.filter((a) => a.questionId === draw.questions[0].id).sort((a, b) => a.slot - b.slot);
+  expect(q1).toHaveLength(3);
+
+  const context = await browser.newContext({ viewport: { width: 1366, height: 768 }, locale: "bg-BG" });
+  await context.addInitScript((key) => localStorage.setItem("asm.admin", key), SECRET());
+  // Record, the moment each drum comes to rest, which name sits in the middle of it.
+  await context.addInitScript(() => {
+    const landed: { slot: number; name: string | null; off: number }[] = [];
+    (window as unknown as { __landed: typeof landed }).__landed = landed;
+    new MutationObserver((muts) => {
+      for (const m of muts) {
+        const reel = m.target as HTMLElement;
+        if (reel.getAttribute("data-landed") !== "true") continue;
+        const lit = reel.querySelector(".reel-lit")!.getBoundingClientRect();
+        const mid = lit.top + lit.height / 2;
+        let best: HTMLElement | null = null;
+        let off = Infinity;
+        for (const li of reel.querySelectorAll<HTMLElement>(".reel-lit li")) {
+          const r = li.getBoundingClientRect();
+          const d = Math.abs(r.top + r.height / 2 - mid);
+          if (d < off) {
+            off = d;
+            best = li;
+          }
+        }
+        const slot = [...document.querySelectorAll('[data-testid="slot"]')].indexOf(reel.closest('[data-testid="slot"]')!);
+        landed.push({ slot, name: best?.textContent ?? null, off });
+      }
+    }).observe(document, { subtree: true, attributes: true, attributeFilter: ["data-landed"] });
+  });
+  const page = await context.newPage();
+  await page.goto("/admin");
+  await expect(page.getByTestId("picking")).toBeVisible();
+
+  // a drum: 7 different names (3 copies for the seamless loop), the chosen leader among them
+  const reels = page.locator(".reel");
+  await expect(reels).toHaveCount(3);
+  for (let i = 0; i < 3; i++) {
+    const names = await reels.nth(i).locator(".reel-lit li").allInnerTexts();
+    expect(names).toHaveLength(21);
+    expect(new Set(names).size).toBe(7);
+    expect(names).toContain(q1[i].userName);
+  }
+  await expectFits(page, "picking");
+
+  // all three come to rest on the leader that is revealed next, in the middle of the drum
+  await expect.poll(async () => (await page.evaluate(() => (window as unknown as { __landed: unknown[] }).__landed.length)), { timeout: 20_000 }).toBe(3);
+  const landed = await page.evaluate(() => (window as unknown as { __landed: { slot: number; name: string; off: number }[] }).__landed);
+  for (const l of landed) {
+    expect(l.name, `drum ${l.slot} rests on the chosen leader`).toBe(q1[l.slot].userName);
+    expect(l.off, `drum ${l.slot} is centred`).toBeLessThan(1);
+  }
+  expect(landed.map((l) => l.slot)).toEqual([0, 1, 2]); // one after another, like the reveals
+  await shot(page, "picker-landed");
+
+  // the ring: full when the wait starts, completely empty (and gone) when it reaches 0
+  await expect(page.getByTestId("countdown")).toBeVisible({ timeout: 15_000 });
+  const c = 2 * Math.PI * 46;
+  const samples: { n: string; off: number; op: number }[] = [];
+  for (let i = 0; i < 80 && (await page.getByTestId("countdown").count()) > 0; i++) {
+    const smp = await page
+      .evaluate(() => {
+        const el = document.querySelector('[data-testid="countdown"]');
+        const ring = el?.querySelectorAll("svg circle")[1];
+        if (!el || !ring) return null;
+        const cs = getComputedStyle(ring);
+        return { n: el.getAttribute("aria-label") ?? "", off: parseFloat(cs.strokeDashoffset), op: parseFloat(cs.opacity) };
+      })
+      .catch(() => null);
+    if (smp) samples.push(smp);
+    await sleep(80);
+  }
+  expect(samples.length).toBeGreaterThan(10);
+  expect(samples[0].off, "starts (nearly) full").toBeLessThan(c * 0.36);
+  const last = samples.at(-1)!;
+  expect(last.n.endsWith(": 1"), "the last sample is from the last second").toBe(true);
+  expect(last.off, "the arc is used up when the number would hit 0").toBeGreaterThan(c * 0.9);
+  expect(last.op, "and it has faded out, no stray dot").toBeLessThan(0.5);
+  for (let i = 1; i < samples.length; i++) expect(samples[i].off, "the ring only ever drains").toBeGreaterThanOrEqual(samples[i - 1].off - 1e-6 - (samples[i].n === samples[i - 1].n ? 0 : c * 0.01));
+
+  await context.close();
+  await api.post("advance", { action: "reset" });
+});
+
+test("skip: the wait between questions and the speaking timer can be skipped, safely", async ({ browser, request }) => {
+  test.setTimeout(180_000);
+  const api = new Admin(request);
+  await api.setup({ teams: ["А", "Б", "В", "Г"], questions: ["Първи въпрос?", "Втори въпрос?"], speak: 90, pause: 40, reveal: 1, scroll: 1 });
+  await api.ok("start", { simulate: true });
+  const { context, page } = await adminPage(browser);
+  await page.getByRole("button", { name: "Определи лидери" }).click();
+  await expect(page.getByTestId("picking")).toBeVisible();
+  await expect(page.getByTestId("picking-question")).toHaveText("Първи въпрос?");
+
+  // the waiting badge shows its number; hovering turns the number into a skip button
+  const badge = page.getByTestId("countdown");
+  await expect(badge).toBeVisible({ timeout: 20_000 });
+  const skip = page.getByTestId("countdown-skip");
+  const number = skip.locator("span").first();
+  await expect(number).toHaveCSS("opacity", "1");
+  await skip.hover();
+  await expect(number).toHaveCSS("opacity", "0");
+  await expect(skip.locator("svg")).toHaveCSS("opacity", "1");
+  await shot(page, "countdown-skip-hover");
+  // 40 s of waiting is cut short: Q2 is on screen within a few seconds
+  await skip.click();
+  await expect(page.getByTestId("picking-question")).toHaveText("Втори въпрос?", { timeout: 6_000 });
+  expect((await api.state()).game).toMatchObject({ stage: "picking", qIndex: 1 });
+
+  // the last wait leads to the results
+  await expect(page.getByTestId("countdown")).toBeVisible({ timeout: 20_000 });
+  await page.getByTestId("countdown-skip").click();
+  await expect(page.getByTestId("results")).toBeVisible({ timeout: 6_000 });
+  expect((await api.state()).assignments.every((a) => a.revealed)).toBe(true);
+
+  // presentation: a faint skip icon next to the big timer, with a question first
+  await page.getByTestId("start-presentation").click();
+  await expect(page.getByTestId("presenting")).toBeVisible();
+  const startedAt = (await api.state()).game.timerStartedAt;
+  await page.getByTestId("skip-timer").click();
+  const ask = page.getByRole("dialog", { name: "Пропускане на времето" });
+  await expect(ask).toBeVisible();
+  await expect(ask).toContainText("Да минем ли към В2?");
+  await shot(page, "skip-confirm");
+  await ask.getByRole("button", { name: "Отказ" }).click();
+  await expect(ask).toBeHidden();
+  expect((await api.state()).game).toMatchObject({ stage: "presenting", qIndex: 0, timerStartedAt: startedAt }); // nothing changed
+
+  await page.getByTestId("skip-timer").click();
+  await page.getByTestId("skip-confirm").dblclick(); // a double click still skips exactly once
+  await expect(page.getByTestId("presenting-question")).toHaveText("Втори въпрос?");
+  const after = (await api.state()).game;
+  expect(after).toMatchObject({ stage: "presenting", qIndex: 1 });
+  expect(after.timerStartedAt!).toBeGreaterThan(startedAt!); // Q2 has its own, full timer
+  expect(clockSeconds(await page.getByTestId("timer").innerText())).toBeGreaterThanOrEqual(85);
+  await expectFits(page, "presenting");
+
+  // skipping the last question ends the game, so it says so
+  await page.getByTestId("skip-timer").click();
+  await expect(ask).toContainText("Да завършим ли играта?");
+  await expect(ask).toContainText("данните на участниците се изтриват");
+  await ask.getByRole("button", { name: "Отказ" }).click();
+  expect((await api.state()).game.status).toBe("live");
+  await page.getByTestId("skip-timer").click();
+  await page.getByTestId("skip-confirm").click();
+  await expect(page.getByTestId("thanks")).toBeVisible();
+  const done = await api.state();
+  expect(done.game.status).toBe("finished");
+  expect(done.playerCount).toBe(0);
+
+  await context.close();
+  await api.post("advance", { action: "reset" });
+});
+
+test("stop presentation: back to the game board from the picking, results and presentation screens", async ({ browser, request }) => {
+  test.setTimeout(180_000);
+  const api = new Admin(request);
+  await api.setup({ teams: ["А", "Б", "В", "Г"], questions: ["Първи въпрос?", "Втори въпрос?"], speak: 90, pause: 1, reveal: 1, scroll: 1 });
+  await api.ok("start", { simulate: true });
+  const { context, page } = await adminPage(browser);
+  const stop = page.getByTestId("stop-presentation");
+  const board = page.getByText("Играта тече");
+
+  // 1. while the draw is running
+  await page.getByRole("button", { name: "Определи лидери" }).click();
+  await expect(page.getByTestId("picking")).toBeVisible();
+  await expect(stop).toBeVisible();
+  await expect(page.getByRole("button", { name: "Изход" })).toBeVisible(); // still next to it
+  await shot(page, "stop-button");
+  await stop.click();
+  const dialog = page.getByRole("dialog", { name: "Спиране на презентацията" });
+  await expect(dialog).toBeVisible();
+  await shot(page, "stop-confirm");
+  await dialog.getByRole("button", { name: "Отказ" }).click();
+  await expect(dialog).toBeHidden();
+  await expect(page.getByTestId("picking")).toBeVisible(); // "Отказ" changes nothing
+  expect((await api.state()).assignments).toHaveLength(4);
+  await stop.click();
+  await page.getByTestId("confirm-stop").click();
+  await expect(board).toBeVisible();
+  let s = await api.state();
+  expect(s.game).toMatchObject({ status: "live", stage: "lobby", qIndex: 0, timerStartedAt: null });
+  expect(s.assignments).toHaveLength(0);
+  expect(s.playerCount).toBe(100);
+  await expect(page.getByTestId("player-count")).toHaveText("100");
+
+  // 2. a new draw runs through to the results, and stops there
+  await page.getByRole("button", { name: "Определи лидери" }).click();
+  await expect(page.getByTestId("results")).toBeVisible({ timeout: 60_000 });
+  await stop.click();
+  await page.getByTestId("confirm-stop").click();
+  await expect(board).toBeVisible();
+  expect((await api.state()).assignments).toHaveLength(0);
+
+  // 3. ... and while a question is being presented
+  await page.getByRole("button", { name: "Определи лидери" }).click();
+  await expect(page.getByTestId("results")).toBeVisible({ timeout: 60_000 });
+  await page.getByTestId("start-presentation").click();
+  await expect(page.getByTestId("presenting")).toBeVisible();
+  await expectFits(page, "presenting");
+  await stop.click();
+  await page.getByTestId("confirm-stop").click();
+  await expect(board).toBeVisible();
+  s = await api.state();
+  expect(s.game).toMatchObject({ status: "live", stage: "lobby", qIndex: 0, timerStartedAt: null });
+  expect(s.assignments).toHaveLength(0);
+  expect(s.playerCount).toBe(100);
+  // the board is fully usable again: the draw can be made once more
+  await expect(page.getByRole("button", { name: "Определи лидери" })).toBeEnabled();
+  await page.getByRole("button", { name: "Определи лидери" }).click();
+  await expect(page.getByTestId("picking")).toBeVisible();
+
+  await context.close();
+  await api.post("advance", { action: "reset" });
+});
+
+test("presentation screen: at most 5 speakers per row, narrow badges, the code centred", async ({ browser, request }) => {
+  test.setTimeout(120_000);
+  const api = new Admin(request);
+  // 10 teams, one question: all ten leaders speak on it, so there are two rows
+  await api.setup({ teams: ["Един", "Два", "Три", "Четири", "Пет", "Шест", "Седем", "Осем", "Девет", "Десет"], questions: ["Единствен въпрос?"], speak: 90, pause: 1, reveal: 1, scroll: 1 });
+  await api.ok("start");
+  const names = ["Александра-Константина Петрова-Иванова", "Ив", "Ж", "Христофор Христофоров", "Ана-Мария", "Борислав", "Цветелина", "Гергана", "Владислав", "Мария"];
+  for (let i = 0; i < 20; i++) await join(request, names[i % names.length].slice(0, 30));
+  await api.ok("assign");
+  const s = await api.state();
+  for (const a of s.assignments) await api.ok("reveal", { assignmentId: a.id });
+  await api.ok("advance", { action: "next-pick", qIndex: 0 });
+  await api.ok("advance", { action: "start-presentation" });
+
+  for (const size of [{ width: 1920, height: 1080 }, { width: 1366, height: 768 }]) {
+    const { context, page } = await adminPage(browser, size);
+    await expect(page.getByTestId("presenting")).toBeVisible();
+    const badges = page.getByTestId("speakers").locator(":scope > div");
+    await expect(badges).toHaveCount(10);
+    await expectFits(page, "presenting");
+    const boxes = await Promise.all((await badges.all()).map((b) => b.boundingBox()));
+    const rows = new Map<number, number>();
+    for (const b of boxes) rows.set(Math.round(b!.y), (rows.get(Math.round(b!.y)) ?? 0) + 1);
+    expect([...rows.values()].sort(), "5 badges per row").toEqual([5, 5]);
+    for (const b of boxes) expect(b!.width, "5 comfortably fit").toBeLessThan(size.width / 5);
+    // the code sits in the vertical middle of its badge
+    for (const badge of await badges.all()) {
+      const bb = (await badge.boundingBox())!;
+      const code = (await badge.locator("span.tnum").boundingBox())!;
+      expect(Math.abs(code.y + code.height / 2 - (bb.y + bb.height / 2)), "code centred vertically").toBeLessThan(3);
+    }
+    // long names break between words, not inside them
+    const broken = await page.getByTestId("speakers").evaluate((el) => {
+      const out: string[] = [];
+      for (const p of el.querySelectorAll<HTMLElement>("p.display")) {
+        const words = (p.textContent ?? "").split(/[\s-]+/).filter(Boolean);
+        const range = document.createRange();
+        const text = p.firstChild!;
+        let at = 0;
+        for (const w of words) {
+          at = (p.textContent ?? "").indexOf(w, at);
+          range.setStart(text, at);
+          range.setEnd(text, at + w.length);
+          if (range.getClientRects().length > 1) out.push(w);
+          at += w.length;
+        }
+      }
+      return out;
+    });
+    expect(broken, `${size.width}: no word is split across lines`).toEqual([]);
+    await shot(page, `${size.width}-speakers-two-rows`);
+    await context.close();
+  }
+  await api.post("advance", { action: "reset" });
+});
+
 // ───────────── 4. projector screens at real-world sizes with worst-case content ─────────────
 
 for (const size of [

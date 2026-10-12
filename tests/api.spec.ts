@@ -331,6 +331,112 @@ test.describe("API: concurrency and load (100 players)", () => {
     expect((await admin.state()).game.status).toBe("prep");
   });
 
+  test("stop-presentation: back to the lobby from every projector stage, leaders cancelled, players kept", async ({ request, baseURL }) => {
+    const admin = new Admin(request);
+    await admin.setup({ teams: ["A", "B", "C"], questions: ["Q1", "Q2"], pause: 1, speak: 60 });
+    // nothing to stop outside the projector screens
+    expect((await admin.advance("stop-presentation")).status()).toBe(409);
+    await admin.ok("start");
+    expect((await admin.advance("stop-presentation")).status()).toBe(409); // lobby
+    const joined = await Promise.all(Array.from({ length: 6 }, (_, i) => join(request, `Играч ${i + 1}`)));
+    const gid = joined[0].body.gameId as number;
+
+    // stage 1: picking, with one leader already revealed on a phone
+    await admin.ok("assign");
+    let s = await admin.state();
+    expect(s.game.stage).toBe("picking");
+    const lead = s.assignments[0];
+    const stream = await new Stream(baseURL!, lead.userCode, gid).open();
+    try {
+      await admin.ok("reveal", { assignmentId: lead.id });
+      await stream.waitFor((d) => d.leader?.assignmentId === lead.id);
+      const seen = stream.snapshots.length;
+      // three stops at once: exactly one wins
+      const stops = await Promise.all([1, 2, 3].map(() => admin.advance("stop-presentation")));
+      expect(stops.map((r) => r.status()).sort()).toEqual([200, 409, 409]);
+      s = await admin.state();
+      expect(s.game).toMatchObject({ status: "live", stage: "lobby", qIndex: 0, timerStartedAt: null });
+      expect(s.assignments).toHaveLength(0);
+      expect(s.playerCount).toBe(6); // players, teams and questions stay
+      expect(s.teams).toHaveLength(3);
+      expect(s.questions).toHaveLength(2);
+      // the phone drops the leader notice by itself, and still knows who it is
+      let after: (typeof stream.snapshots)[number] | undefined;
+      for (const end = Date.now() + 8_000; !after && Date.now() < end; await sleep(50)) {
+        after = stream.snapshots.slice(seen).find((x) => x.data.user && x.data.leader === null);
+      }
+      expect(after, "a new snapshot without the leader notice").toBeTruthy();
+      expect(after!.data.user.code).toBe(lead.userCode);
+    } finally {
+      stream.close();
+    }
+
+    // the old leader can be moved again, and a fresh draw works
+    const other = s.teams.find((t) => t.id !== lead.teamId)!;
+    expect((await admin.post("move", { userId: lead.userId, teamId: other.id })).status()).toBe(200);
+    await admin.ok("assign");
+    s = await admin.state();
+    expect(s.assignments).toHaveLength(3);
+    expect(s.assignments.every((a) => !a.revealed)).toBe(true);
+
+    // stage 2: results
+    for (const q of s.questions) {
+      for (const a of s.assignments.filter((x) => x.questionId === q.id)) await admin.ok("reveal", { assignmentId: a.id });
+      await admin.ok("advance", { action: "next-pick", qIndex: s.questions.indexOf(q) });
+    }
+    expect((await admin.state()).game.stage).toBe("results");
+    expect((await admin.advance("stop-presentation")).status()).toBe(200);
+    s = await admin.state();
+    expect(s.game).toMatchObject({ stage: "lobby", qIndex: 0 });
+    expect(s.assignments).toHaveLength(0);
+
+    // stage 3: presenting (timer running)
+    await admin.ok("assign");
+    s = await admin.state();
+    for (const q of s.questions) {
+      for (const a of s.assignments.filter((x) => x.questionId === q.id)) await admin.ok("reveal", { assignmentId: a.id });
+      await admin.ok("advance", { action: "next-pick", qIndex: s.questions.indexOf(q) });
+    }
+    await admin.ok("advance", { action: "start-presentation" });
+    s = await admin.state();
+    expect(s.game.stage).toBe("presenting");
+    expect(s.game.timerStartedAt).not.toBeNull();
+    expect((await admin.advance("stop-presentation")).status()).toBe(200);
+    s = await admin.state();
+    expect(s.game).toMatchObject({ status: "live", stage: "lobby", qIndex: 0, timerStartedAt: null });
+    expect(s.assignments).toHaveLength(0);
+    expect(s.playerCount).toBe(6);
+    await admin.post("advance", { action: "reset" });
+  });
+
+  test("skipping a running timer is one clean step: the next question starts with a fresh timer", async ({ request }) => {
+    const admin = new Admin(request);
+    await admin.setup({ teams: ["A", "B", "C"], questions: ["Q1", "Q2", "Q3"], pause: 1, speak: 120 });
+    await admin.ok("start");
+    await Promise.all(Array.from({ length: 6 }, (_, i) => join(request, `Играч ${i + 1}`)));
+    await admin.ok("assign");
+    let s = await admin.state();
+    for (const q of s.questions) {
+      for (const a of s.assignments.filter((x) => x.questionId === q.id)) await admin.ok("reveal", { assignmentId: a.id });
+      await admin.ok("advance", { action: "next-pick", qIndex: s.questions.indexOf(q) });
+    }
+    await admin.ok("advance", { action: "start-presentation" });
+    s = await admin.state();
+    const first = s.game.timerStartedAt!;
+    await sleep(1200);
+    // skip while 118 s are left; a double click (or a second admin tab) only skips once
+    const skips = await Promise.all([admin.advance("next", 0), admin.advance("next", 0)]);
+    expect(skips.map((r) => r.status()).sort()).toEqual([200, 409]);
+    s = await admin.state();
+    expect(s.game).toMatchObject({ stage: "presenting", qIndex: 1 });
+    expect(s.game.timerStartedAt!).toBeGreaterThan(first + 1000); // the clock of Q2 restarted
+    expect(s.game.speakSeconds).toBe(120); // the setting itself is untouched
+    // a skip aimed at a question that is already over is refused, not applied to the next one
+    expect((await admin.advance("next", 0)).status()).toBe(409);
+    expect((await admin.state()).game.qIndex).toBe(1);
+    await admin.post("advance", { action: "reset" });
+  });
+
   test("assign needs enough teams with players", async ({ request }) => {
     const admin = new Admin(request);
     await admin.setup({ teams: ["A", "B", "C"], questions: ["Q1", "Q2"] });

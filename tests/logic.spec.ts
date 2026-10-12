@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { assignLeaders, cleanName, formatClock, seededRng, teamIndexForSeq } from "../lib/logic";
+import { reelNames, reelTrack } from "../lib/reel";
 
 const mkTeams = (sizes: number[]) =>
   sizes.map((n, i) => ({ id: i + 1, members: Array.from({ length: n }, (_, j) => ({ id: (i + 1) * 1000 + j })) }));
@@ -84,5 +85,82 @@ test.describe("helpers", () => {
     expect(cleanName("  Иван   Петров ")).toBe("Иван Петров");
     expect(cleanName(42)).toBe("");
     expect(cleanName(undefined)).toBe("");
+  });
+});
+
+test.describe("leader picker drum", () => {
+  const mod = (x: number, n: number) => ((x % n) + n) % n;
+
+  test("always comes to rest exactly on the chosen item, at the stop time", () => {
+    for (let seed = 1; seed <= 300; seed++) {
+      const rng = seededRng(seed);
+      const land = Math.floor(rng() * 7);
+      const stop = 300 + Math.floor(rng() * 9000);
+      const t = reelTrack(7, land, rng() * 7, stop);
+      expect(mod(t.final, 7), `seed ${seed}`).toBe(land);
+      expect(t.at(stop).pos).toBe(t.final);
+      expect(t.at(stop).speed).toBe(0);
+      expect(t.at(stop + 5000).pos).toBe(t.final);
+      expect(Math.abs(t.at(stop - 1).pos - t.final), "no jump into the stop").toBeLessThan(0.05);
+    }
+  });
+
+  test("never runs backwards, slows down monotonically and keeps its speed continuous", () => {
+    const problems: string[] = [];
+    for (let seed = 1; seed <= 100; seed++) {
+      const rng = seededRng(seed * 13);
+      const stop = 600 + Math.floor(rng() * 8000);
+      const t = reelTrack(7, Math.floor(rng() * 7), rng() * 7, stop);
+      let prev = t.at(0);
+      let slowing = false;
+      for (let ms = 5; ms <= stop; ms += 5) {
+        const cur = t.at(ms);
+        if (cur.pos < prev.pos - 1e-9) problems.push(`seed ${seed} @${ms}: ran backwards`);
+        if (cur.speed < prev.speed - 1e-9) slowing = true;
+        if (slowing && cur.speed > prev.speed + 1e-9) problems.push(`seed ${seed} @${ms}: sped up again`);
+        if (Math.abs(cur.pos - prev.pos) > 0.4) problems.push(`seed ${seed} @${ms}: jumped ${cur.pos - prev.pos}`); // 5 ms never covers 0.4 items
+        prev = cur;
+      }
+      if (!(t.at(stop * 0.99).speed < t.at(0).speed * 0.05)) problems.push(`seed ${seed}: not nearly stopped just before the end`);
+    }
+    expect(problems).toEqual([]);
+  });
+
+  test("starts fast and spends the last stretch slowing down", () => {
+    const t = reelTrack(7, 3, 0, 5000);
+    expect(t.at(100).speed).toBeGreaterThanOrEqual(11);
+    expect(t.at(1500).speed).toBeGreaterThanOrEqual(11); // still at full speed well before the end
+    expect(t.at(4000).speed).toBeLessThan(t.at(1500).speed); // already slowing
+    expect(t.at(4900).speed).toBeLessThan(1);
+  });
+
+  test("a zero or tiny stop time lands at once", () => {
+    for (const stop of [0, 1, 50]) {
+      const t = reelTrack(7, 5, 2.3, stop);
+      expect(mod(t.final, 7)).toBe(5);
+      expect(t.at(stop).pos).toBe(t.final);
+    }
+  });
+
+  test("names: seven stops, the chosen player is exactly where the drum lands", () => {
+    const pool = Array.from({ length: 40 }, (_, i) => `Играч ${i}`);
+    for (let seed = 1; seed <= 100; seed++) {
+      const { names, land } = reelNames("Играч 7", pool, seed);
+      expect(names).toHaveLength(7);
+      expect(names[land]).toBe("Играч 7");
+      expect(names.filter((n) => n === "Играч 7")).toHaveLength(1);
+      expect(new Set(names).size).toBe(7); // enough players: every stop is a different name
+      expect(reelNames("Играч 7", pool, seed)).toEqual({ names, land }); // stable for a seed
+    }
+  });
+
+  test("names: tiny games still fill the drum", () => {
+    const few = reelNames("Ана", ["Ана", "Бо", "Вихър"], 5);
+    expect(few.names).toHaveLength(7);
+    expect(few.names[few.land]).toBe("Ана");
+    expect(few.names.every((n) => ["Ана", "Бо", "Вихър"].includes(n))).toBe(true);
+    const alone = reelNames("Ана", ["Ана"], 9);
+    expect(alone.names).toEqual(Array(7).fill("Ана"));
+    expect(reelNames("Ана", [], 1).names[reelNames("Ана", [], 1).land]).toBe("Ана");
   });
 });

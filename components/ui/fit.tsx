@@ -27,12 +27,18 @@ export function FitText({
     const t = el.current;
     if (!b || !t) return;
     const fit = () => {
-      const max = Math.min((window.innerHeight * maxVh) / 100, window.innerWidth * 0.07);
+      const max = Math.min(
+        (window.innerHeight * maxVh) / 100,
+        window.innerWidth * 0.07,
+      );
       let lo = minPx;
       let hi = Math.max(max, minPx);
       const fits = (px: number) => {
         t.style.fontSize = `${px}px`;
-        return t.scrollHeight <= b.clientHeight + 1 && t.scrollWidth <= b.clientWidth + 1;
+        return (
+          t.scrollHeight <= b.clientHeight + 1 &&
+          t.scrollWidth <= b.clientWidth + 1
+        );
       };
       if (fits(hi)) return;
       for (let i = 0; i < 9; i++) {
@@ -51,8 +57,12 @@ export function FitText({
 
   return (
     <div ref={box} className="flex min-h-0 flex-1 items-center overflow-hidden">
-      <h1 ref={el} className={`display w-full [overflow-wrap:anywhere] ${className}`} data-testid={testId}>
-        {text}
+      <h1
+        ref={el}
+        className={`display w-full [overflow-wrap:anywhere] ${className}`}
+        data-testid={testId}
+      >
+        {text}a
       </h1>
     </div>
   );
@@ -68,7 +78,9 @@ export function useFit<T extends HTMLElement>(signature: string) {
     const root = ref.current;
     if (!root) return;
     const run = () => {
-      const ok = () => root.scrollHeight <= root.clientHeight + 1 && root.scrollWidth <= root.clientWidth + 1;
+      const ok = () =>
+        root.scrollHeight <= root.clientHeight + 1 &&
+        root.scrollWidth <= root.clientWidth + 1;
       root.style.setProperty("--k", "1");
       if (ok()) return;
       let lo = 0.35;

@@ -48,4 +48,4 @@ export type AdminState = {
   playerCount: number;
 };
 
-export type AdvanceAction = "next-pick" | "start-presentation" | "next" | "new-game" | "reset";
+export type AdvanceAction = "next-pick" | "start-presentation" | "stop-presentation" | "next" | "new-game" | "reset";

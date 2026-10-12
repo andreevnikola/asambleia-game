@@ -303,6 +303,100 @@ dialog::backdrop {
   color: #fff;
 }
 
+/* ── the leader picker: a drum of names, magnified and lit in the middle row ── */
+.reel {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+.reel-band {
+  position: absolute;
+  inset-inline: 0;
+  top: 40%;
+  height: 20%;
+  background: linear-gradient(90deg, transparent, rgba(0, 162, 224, 0.2) 22%, rgba(0, 162, 224, 0.2) 78%, transparent);
+  border-block: 2px solid rgba(0, 162, 224, 0.75);
+  transition: border-color 160ms ease;
+}
+.reel-band::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--color-gold);
+  opacity: 0;
+}
+.reel-layer {
+  position: absolute;
+  inset: 0;
+}
+/* Two copies of the same glyphs, same size and weight: the dim one fills the drum, the bright one
+   is only let through by a mask around the middle row, so a name warms up as it nears the pick. */
+.reel-dim,
+.reel-lit {
+  /* 38vh of slots shared by --slot-rows rows of panels (set on the slots grid) */
+  --cap: calc(4.4vh / var(--slot-rows, 1));
+}
+.reel-dim {
+  color: rgba(255, 255, 255, 0.4);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 2%, #000 22%, #000 78%, transparent 98%);
+  mask-image: linear-gradient(to bottom, transparent 2%, #000 22%, #000 78%, transparent 98%);
+}
+.reel-lit {
+  color: #fff;
+  text-shadow: 0 0 0.5em rgba(0, 162, 224, 0.6);
+  transition: color 140ms ease, text-shadow 140ms ease;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 32%, #000 44%, #000 56%, transparent 68%);
+  mask-image: linear-gradient(to bottom, transparent 32%, #000 44%, #000 56%, transparent 68%);
+}
+.reel-list {
+  position: absolute;
+  inset-inline: 0;
+  top: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  text-align: center;
+  will-change: transform;
+}
+.reel-list li {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-inline: 12cqw;
+  /* as large as the cap, but never wider than the middle of the panel */
+  font-size: min(var(--cap), calc(170cqw / var(--len)));
+}
+.reel-list span {
+  max-width: 100%;
+  padding-right: 0.08em;
+  overflow: hidden;
+  line-height: 1.2;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.reel[data-speed="1"] .reel-list {
+  filter: blur(0.5px);
+}
+.reel[data-speed="2"] .reel-list {
+  filter: blur(1.2px);
+}
+.reel[data-speed="3"] .reel-list {
+  filter: blur(2.2px);
+}
+.reel[data-landed="true"] .reel-lit {
+  color: var(--color-gold);
+  text-shadow: 0 0 0.5em rgba(255, 198, 41, 0.6);
+}
+.reel[data-landed="true"] .reel-band {
+  border-color: var(--color-gold);
+}
+.reel[data-landed="true"] .reel-band::after {
+  animation: lock 520ms ease-out both;
+}
+.reel[data-landed="true"] .reel-lit {
+  animation: settle 420ms ease-out both;
+}
+
 /* ── motion ── */
 @keyframes pop {
   from {
@@ -322,12 +416,40 @@ dialog::backdrop {
     clip-path: polygon(-20% 0, 120% 0, 120% 100%, -20% 100%);
   }
 }
-@keyframes reel {
+@keyframes ring-drain {
   from {
-    transform: translateY(0);
+    stroke-dashoffset: var(--ring-from);
   }
   to {
-    transform: translateY(-50%);
+    stroke-dashoffset: var(--ring-to);
+  }
+}
+@keyframes ring-vanish {
+  0%,
+  55% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+@keyframes settle {
+  0% {
+    transform: scale(1);
+  }
+  35% {
+    transform: scale(1.08);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+@keyframes lock {
+  from {
+    opacity: 0.5;
+  }
+  to {
+    opacity: 0;
   }
 }
 @keyframes reveal {
