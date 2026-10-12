@@ -13,7 +13,10 @@ export function JoinScreen({
   const [name, setName] = useState("");
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState<"join" | "login" | null>(null);
-  const [error, setError] = useState<{ field: "join" | "login"; text: string } | null>(null);
+  const [error, setError] = useState<{
+    field: "join" | "login";
+    text: string;
+  } | null>(null);
 
   async function submit(kind: "join" | "login") {
     if (busy) return;
@@ -29,8 +32,12 @@ export function JoinScreen({
       <InteractLogo className="h-11 w-auto self-start" />
 
       <h1 className="display mt-10 text-royal">
-        <span className="block text-[2.5rem]">Дистриктна Интеракт Асамблея</span>
-        <span className="block text-[6.5rem] leading-[0.9]">„Игра“</span>
+        <span className="block text-[1.35rem] text-center">
+          Дистриктна Интеракт Асамблея
+        </span>
+        <span className="block text-[6.5rem] leading-[1.1] text-center">
+          „Игра“
+        </span>
       </h1>
 
       <form
@@ -55,11 +62,18 @@ export function JoinScreen({
           aria-describedby={error?.field === "join" ? "join-error" : undefined}
         />
         {error?.field === "join" && (
-          <p id="join-error" role="alert" className="mt-2 font-medium text-signal">
+          <p
+            id="join-error"
+            role="alert"
+            className="mt-2 font-medium text-signal"
+          >
             {error.text}
           </p>
         )}
-        <button className="btn mt-4 w-full" disabled={busy !== null || name.trim() === ""}>
+        <button
+          className="btn mt-4 w-full"
+          disabled={busy !== null || name.trim() === ""}
+        >
           {busy === "join" ? "Влизаме…" : "Влез в играта"}
         </button>
       </form>
@@ -84,16 +98,27 @@ export function JoinScreen({
             maxLength={3}
             placeholder="000"
             value={code}
-            onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 3))}
+            onChange={(e) =>
+              setCode(e.target.value.replace(/\D/g, "").slice(0, 3))
+            }
             aria-invalid={error?.field === "login"}
-            aria-describedby={error?.field === "login" ? "login-error" : undefined}
+            aria-describedby={
+              error?.field === "login" ? "login-error" : undefined
+            }
           />
-          <button className="btn btn-ghost flex-1" disabled={busy !== null || code.length !== 3}>
+          <button
+            className="btn btn-ghost flex-1"
+            disabled={busy !== null || code.length !== 3}
+          >
             {busy === "login" ? "Влизаме…" : "Влез с код"}
           </button>
         </div>
         {error?.field === "login" && (
-          <p id="login-error" role="alert" className="mt-2 font-medium text-signal">
+          <p
+            id="login-error"
+            role="alert"
+            className="mt-2 font-medium text-signal"
+          >
             {error.text}
           </p>
         )}

@@ -18,7 +18,13 @@ function nameSize(name: string): string {
   return "text-[1.4rem]";
 }
 
-export function Home({ snap, onSignOut }: { snap: Joined; onSignOut: () => void }) {
+export function Home({
+  snap,
+  onSignOut,
+}: {
+  snap: Joined;
+  onSignOut: () => void;
+}) {
   const { user, questions, leader } = snap;
   const [confirmOut, setConfirmOut] = useState(false);
   const [acked, setAcked] = useState<number | null>(null);
@@ -31,7 +37,8 @@ export function Home({ snap, onSignOut }: { snap: Joined; onSignOut: () => void 
   const showTakeover = leader !== null && acked !== leader.assignmentId;
   const leaderId = leader?.assignmentId;
   useEffect(() => {
-    if (leaderId !== undefined && acked !== leaderId) navigator.vibrate?.([220, 90, 220]);
+    if (leaderId !== undefined && acked !== leaderId)
+      navigator.vibrate?.([220, 90, 220]);
   }, [leaderId, acked]);
 
   function dismiss() {
@@ -53,14 +60,20 @@ export function Home({ snap, onSignOut }: { snap: Joined; onSignOut: () => void 
         <h1 className="sr-only">Дистриктна Интеракт Асамблея - „Игра“</h1>
 
         <section className="ticket mt-1" aria-label="Твоят код">
-          <div className="min-w-0 p-5">
-            <p className={`display [overflow-wrap:anywhere] ${nameSize(user.name)}`} data-testid="player-name">
+          <div className="min-w-0 p-5 items-center justify-start flex flex-grow">
+            <p
+              className={`display [overflow-wrap:anywhere] ${nameSize(user.name)}`}
+              data-testid="player-name"
+            >
               {user.name}
             </p>
           </div>
           <div className="ticket-stub grid content-center justify-items-center px-5 py-4 text-center">
             <p className="text-sm font-medium text-ink-soft">Твоят код</p>
-            <p className="display tnum text-[3.4rem] text-royal" data-testid="player-code">
+            <p
+              className="display tnum text-[3.4rem] text-royal"
+              data-testid="player-code"
+            >
               {user.code}
             </p>
           </div>
@@ -68,7 +81,10 @@ export function Home({ snap, onSignOut }: { snap: Joined; onSignOut: () => void 
 
         <section className="mt-9">
           <p className="font-medium text-ink-soft">Отбор:</p>
-          <p className="display text-[3.6rem] text-royal [overflow-wrap:anywhere]" data-testid="player-team">
+          <p
+            className="display text-[3.6rem] text-royal [overflow-wrap:anywhere]"
+            data-testid="player-team"
+          >
             {user.team}
           </p>
         </section>
@@ -82,14 +98,15 @@ export function Home({ snap, onSignOut }: { snap: Joined; onSignOut: () => void 
                 <li
                   key={q.id}
                   className={`grid grid-cols-[3.2rem_1fr] items-baseline gap-2 border-t border-line py-4 ${
-                    mine ? "-mx-4 border-l-[6px] border-l-gold bg-gold/20 pl-[calc(1rem-6px)] pr-4" : ""
+                    mine
+                      ? "-mx-4 border-l-[6px] border-l-gold bg-gold/20 pl-[calc(1rem-6px)] pr-4"
+                      : ""
                   }`}
                 >
-                  <span className="display text-[1.9rem] text-royal">В{q.n}</span>
-                  <span className="[overflow-wrap:anywhere]">
-                    {q.text}
-                    {mine && <strong className="mt-1 block text-sm text-ink">Ти представяш отбора по този въпрос</strong>}
+                  <span className="display text-[1.9rem] text-royal">
+                    В{q.n}
                   </span>
+                  <span className="[overflow-wrap:anywhere]">{q.text}</span>
                 </li>
               );
             })}
@@ -104,34 +121,61 @@ export function Home({ snap, onSignOut }: { snap: Joined; onSignOut: () => void 
         >
           <div className="mx-auto max-w-[480px] px-4 pb-[calc(env(safe-area-inset-bottom)+1rem)] pt-7">
             <p className="display text-[1.7rem]">
-              Ти представяш отбор {leader.team} по въпрос В{leader.n}
+              Ти представяш отбор{" "}
+              <span className="underline">{leader.team}</span> по въпрос{" "}
+              <span className="underline">В{leader.n}</span>
             </p>
           </div>
         </aside>
       )}
 
-      <Modal open={showTakeover} className="takeover" label="Ти си избран" onClose={dismiss}>
+      <Modal
+        open={showTakeover}
+        className="takeover"
+        label="Ти си избран"
+        onClose={dismiss}
+      >
         {leader && (
           <div
             className="mx-auto flex h-full w-full max-w-[520px] flex-col px-6 pb-[calc(env(safe-area-inset-bottom)+1.5rem)] pt-[calc(env(safe-area-inset-top)+2rem)]"
             data-testid="takeover"
           >
-            <p className="text-lg font-medium text-white/85">{user.name}, избран си за лидер!</p>
-            <h2 className="display mt-3 text-[3.7rem] [overflow-wrap:anywhere]">Ти представяш отбор {leader.team}</h2>
+            <p className="text-lg font-medium text-white/85">
+              {user.name}, избран си за лидер!
+            </p>
+            <h2 className="display mt-3 text-[3.3rem] [overflow-wrap:anywhere]">
+              Ти представяш отбор{" "}
+              <span className="underline">{leader.team}</span>
+            </h2>
             <div className="parallelogram mt-8 bg-gold px-8 py-6 text-ink">
               <p className="display text-[2rem]">Въпрос В{leader.n}</p>
-              <p className="mt-2 text-[1.3rem] font-semibold leading-snug [overflow-wrap:anywhere]">{leader.text}</p>
+              <p className="mt-2 text-[1.3rem] font-semibold leading-snug [overflow-wrap:anywhere]">
+                {leader.text}
+              </p>
             </div>
-            <button className="btn btn-white mt-auto w-full" onClick={dismiss} autoFocus>
+            <button
+              className="btn btn-white mt-auto w-full"
+              onClick={dismiss}
+              autoFocus
+            >
               Разбрах
             </button>
           </div>
         )}
       </Modal>
 
-      <Modal open={confirmOut} onClose={() => setConfirmOut(false)} className="sheet m-auto" label="Изход">
-        <h2 className="display text-[2.2rem]">Сигурен ли си, че искаш да излезеш?</h2>
-        <p className="mt-3 text-ink-soft">Запомни кода си — без него не можеш да влезеш отново.</p>
+      <Modal
+        open={confirmOut}
+        onClose={() => setConfirmOut(false)}
+        className="sheet m-auto"
+        label="Изход"
+      >
+        <h2 className="display text-[2.2rem]">
+          Сигурен ли си, че искаш да излезеш?
+        </h2>
+        <p className="mt-3 text-ink-soft">
+          Запомни кода си — без него не можеш да влезеш отново.
+        </p>
         <p
           className="display tnum my-5 rounded-xl bg-paper py-3 text-center text-[5rem] tracking-[0.12em] text-royal"
           data-testid="signout-code"
@@ -142,7 +186,11 @@ export function Home({ snap, onSignOut }: { snap: Joined; onSignOut: () => void 
           <button className="btn btn-danger w-full" onClick={onSignOut}>
             Изход
           </button>
-          <button className="btn btn-ghost w-full" onClick={() => setConfirmOut(false)} autoFocus>
+          <button
+            className="btn btn-ghost w-full"
+            onClick={() => setConfirmOut(false)}
+            autoFocus
+          >
             Остани
           </button>
         </div>
