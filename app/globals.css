@@ -1,0 +1,391 @@
+@import "tailwindcss";
+
+/* Palette comes from the two supplied logos: Interact azure (SVG) and the royal blue of "Create lasting impact" (PNG). */
+@theme {
+  --color-azure: #00a2e0;
+  --color-royal: #006bb7;
+  --color-royal-deep: #00528c;
+  --color-ink: #06263f;
+  --color-ink-2: #0b3a5f;
+  --color-ink-soft: #46647c;
+  --color-paper: #f2f8fc;
+  --color-line: #d2e2ee;
+  --color-gold: #ffc629;
+  --color-signal: #d63a4f;
+
+  --font-display: var(--f-display), "Fira Sans Extra Condensed", "Arial Narrow", sans-serif;
+  --font-body: var(--f-body), "Onest", system-ui, sans-serif;
+}
+
+:root {
+  --slant: -9deg;
+}
+
+html {
+  background: var(--color-paper);
+  color: var(--color-ink);
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: 17px;
+  line-height: 1.45;
+  background: var(--color-paper);
+  color: var(--color-ink);
+  min-height: 100dvh;
+  -webkit-tap-highlight-color: transparent;
+}
+
+*:focus-visible {
+  outline: 3px solid var(--color-azure);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+}
+
+/* ── display type: the italic condensed heavy of the "Create lasting impact" logotype ── */
+.display {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-weight: 800;
+  line-height: 0.98;
+  letter-spacing: -0.005em;
+  text-wrap: balance;
+}
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── buttons: one slanted action surface (the only place the −9° angle appears, besides reels) ── */
+.btn {
+  --h: 52px;
+  --k: calc(var(--h) * 0.158); /* tan(9°) × height: keeps the slant inside the button box */
+  --bg: var(--color-royal);
+  --bg-hover: var(--color-royal-deep);
+  --fg: #fff;
+  position: relative;
+  isolation: isolate;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  min-height: var(--h);
+  padding: 0 calc(var(--k) + 1.4rem);
+  border: 0;
+  background: none;
+  color: var(--fg);
+  font-family: var(--font-display);
+  font-style: italic;
+  font-weight: 800;
+  font-size: 1.35rem;
+  line-height: 1;
+  white-space: nowrap;
+  transition: transform 120ms ease;
+}
+.btn::before,
+.btn::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: var(--bg);
+  clip-path: polygon(var(--k) 0, 100% 0, calc(100% - var(--k)) 100%, 0 100%);
+  transition: background 120ms ease;
+}
+.btn::after {
+  display: none;
+}
+.btn:hover:not(:disabled)::before {
+  background: var(--bg-hover);
+}
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.btn-gold {
+  --bg: var(--color-gold);
+  --bg-hover: #ffd35c;
+  --fg: var(--color-ink);
+}
+.btn-white {
+  --bg: #fff;
+  --bg-hover: #e6f3fb;
+  --fg: var(--color-royal-deep);
+}
+.btn-danger {
+  --bg: var(--color-signal);
+  --bg-hover: #b92d41;
+}
+/* ghost = royal parallelogram with a page-coloured parallelogram inset 2px (outline that keeps the slant) */
+.btn-ghost {
+  --ring: var(--color-royal);
+  --fill: var(--color-paper);
+  --fill-hover: #dcecf7;
+  --fg: var(--color-royal-deep);
+}
+.btn-ghost::before {
+  background: var(--ring);
+}
+.btn-ghost::after {
+  display: block;
+  z-index: -1;
+  background: var(--fill);
+  clip-path: polygon(
+    calc(var(--k) + 2px) 2px,
+    calc(100% - 2px) 2px,
+    calc(100% - var(--k) - 2px) calc(100% - 2px),
+    2px calc(100% - 2px)
+  );
+}
+.btn-ghost:hover:not(:disabled)::before {
+  background: var(--ring);
+}
+.btn-ghost:hover:not(:disabled)::after {
+  background: var(--fill-hover);
+}
+.btn-ghost.on-dark {
+  --ring: rgba(255, 255, 255, 0.65);
+  --fill: var(--color-ink);
+  --fill-hover: var(--color-ink-2);
+  --fg: #fff;
+}
+.sheet .btn-ghost {
+  --fill: #fff;
+}
+.btn-sm {
+  --h: 42px;
+  font-size: 1.1rem;
+}
+.btn-lg {
+  --h: 72px;
+  font-size: 2rem;
+}
+
+/* quiet, rectangular utility buttons (not an action surface, so no slant) */
+.chip-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 36px;
+  padding: 0 0.75rem;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--color-ink);
+  font-size: 0.95rem;
+  font-weight: 500;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.chip-btn:hover:not(:disabled) {
+  background: #e6f3fb;
+  border-color: var(--color-azure);
+}
+.chip-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.chip-btn.danger {
+  color: var(--color-signal);
+}
+.chip-btn.danger:hover:not(:disabled) {
+  background: #fdecef;
+  border-color: var(--color-signal);
+}
+.link-btn {
+  background: none;
+  border: 0;
+  padding: 0.5rem 0;
+  color: var(--color-royal-deep);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+/* ── fields ── */
+.field {
+  width: 100%;
+  min-height: 56px;
+  padding: 0 1rem;
+  border: 2px solid var(--color-line);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--color-ink);
+  font: inherit;
+  font-size: 1.1rem; /* >=16px: no iOS zoom */
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+.field:focus {
+  outline: none;
+  border-color: var(--color-royal);
+  box-shadow: 0 0 0 4px rgba(0, 162, 224, 0.25);
+}
+.field::placeholder {
+  color: #8aa2b6;
+}
+textarea.field {
+  padding: 0.75rem 1rem;
+  line-height: 1.4;
+  resize: none;
+}
+.field-code {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-weight: 800;
+  font-size: 2rem;
+  letter-spacing: 0.25em;
+  text-align: center;
+}
+
+/* ── native <dialog> ── */
+dialog {
+  color: var(--color-ink);
+}
+dialog::backdrop {
+  background: rgba(6, 38, 63, 0.62);
+  backdrop-filter: blur(2px);
+}
+.sheet {
+  margin: auto; /* Tailwind's preflight zeroes <dialog> margins */
+  width: min(92vw, 460px);
+  padding: 1.75rem;
+  border: 0;
+  border-radius: 20px;
+  background: #fff;
+  box-shadow: 0 24px 60px rgba(6, 38, 63, 0.35);
+  animation: pop 180ms ease-out;
+}
+
+/* ── ticket (the player's code) ── */
+.ticket {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  background: #fff;
+  border-radius: 14px;
+  border: 1px solid var(--color-line);
+}
+.ticket-stub {
+  position: relative;
+  border-left: 2px dashed var(--color-line);
+}
+.ticket-stub::before,
+.ticket-stub::after {
+  content: "";
+  position: absolute;
+  left: -12px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--color-paper);
+  border: 1px solid var(--color-line);
+}
+.ticket-stub::before {
+  top: -12px;
+  clip-path: inset(50% 0 0 0);
+}
+.ticket-stub::after {
+  bottom: -12px;
+  clip-path: inset(0 0 50% 0);
+}
+
+/* ── stage (projector) theme ── */
+.stage {
+  background: var(--color-ink);
+  color: #fff;
+}
+
+/* ── motion ── */
+@keyframes pop {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes takeover {
+  from {
+    clip-path: polygon(100% 0, 100% 0, 100% 100%, 100% 100%);
+  }
+  to {
+    clip-path: polygon(-20% 0, 120% 0, 120% 100%, -20% 100%);
+  }
+}
+@keyframes reel {
+  from {
+    transform: translateY(0);
+  }
+  to {
+    transform: translateY(-50%);
+  }
+}
+@keyframes reveal {
+  0% {
+    transform: scale(0.86);
+    filter: brightness(2.4);
+    opacity: 0;
+  }
+  60% {
+    transform: scale(1.04);
+    filter: brightness(1.2);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+    filter: none;
+  }
+}
+@keyframes rise {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: none;
+  }
+}
+@keyframes blink {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+  }
+}
+
+/* ── player takeover: the one orchestrated moment on the phone ── */
+.takeover {
+  width: 100vw;
+  height: 100dvh;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: var(--color-royal);
+  color: #fff;
+  animation: takeover 520ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+.takeover::backdrop {
+  background: transparent;
+}
+.parallelogram {
+  clip-path: polygon(4% 0, 100% 0, 96% 100%, 0 100%);
+}
