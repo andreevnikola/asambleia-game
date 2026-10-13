@@ -24,6 +24,17 @@ async function adminPage(browser: Browser, viewport = { width: 1366, height: 768
   return { context, page };
 }
 
+/** The admin board's two steps: store the draw ("Назначи лидери"), then start the show ("Определи лидери"). */
+async function startShow(page: Page) {
+  await page.getByTestId("assign").click();
+  await page.getByTestId("start-picking").click();
+}
+
+/** A phone that comes back to the app (screen on / tab visible): it checks the server at once. */
+async function wakeUp(page: Page) {
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+}
+
 async function playerContext(browser: Browser) {
   return browser.newContext({
     viewport: { width: 375, height: 812 },
@@ -322,15 +333,33 @@ test("full game: join, sign out/in, move, leader picking, notifications, present
   await admin.getByTestId(`member-${p2.code}`).click();
   await expect(admin.getByTestId("move-popover")).toBeVisible();
   await admin.getByTestId("move-popover").getByRole("button", { name: /Червени/ }).click();
+  // phones that are not leaders have no live feed: the new team shows on their next check (here: they wake up
+  // once the move has gone through)
+  await expect
+    .poll(async () => (await api.state()).teams.find((t) => t.name === "Червени")!.members.some((m) => m.code === p2.code))
+    .toBe(true);
+  await wakeUp(p2.page);
   await expect(p2.page.getByTestId("player-team")).toHaveText("Червени", { timeout: 15_000 });
   p2.team = "Червени";
   await expect(admin.getByTestId("team-" + (await api.state()).teams[0].id).getByText(p2.name)).toBeVisible();
 
-  // ── leaders ──
-  await admin.getByRole("button", { name: "Определи лидери" }).click();
-  await expect(admin.getByTestId("picking")).toBeVisible();
+  // ── leaders, step 1: the draw is stored; the show is not running ──
+  await expect(admin.getByTestId("start-picking")).toHaveCount(0);
+  await admin.getByTestId("assign").click();
+  await expect(admin.getByTestId("assigned-status")).toContainText("Лидерите са назначени");
+  await expect(admin.getByTestId("board")).toBeVisible(); // still the board, nothing on the projector yet
   const draw = await api.state();
+  expect(draw.game.stage).toBe("lobby");
   expect(draw.assignments).toHaveLength(3); // 3 teams with players
+  expect(draw.assignments.every((a) => !a.revealed)).toBe(true);
+  // phones learn about the draw on their next check (here: they wake up); the leaders then connect
+  for (const p of players) await wakeUp(p.page);
+  await expect(admin.getByTestId("leaders-connected")).toHaveText("3", { timeout: 15_000 });
+  for (const p of players) await expect(p.page.getByTestId("takeover")).toHaveCount(0); // nobody is told early
+
+  // ── step 2: the show ──
+  await admin.getByTestId("start-picking").click();
+  await expect(admin.getByTestId("picking")).toBeVisible();
   const q1Slots = draw.assignments.filter((a) => a.questionId === draw.questions[0].id);
   const q2Slots = draw.assignments.filter((a) => a.questionId === draw.questions[1].id);
   expect(q1Slots.length).toBe(2);
@@ -448,6 +477,8 @@ test("full game: join, sign out/in, move, leader picking, notifications, present
   await expect(admin.getByTestId("thanks")).toContainText("Благодаря за активността");
   await shot(admin, "admin-thanks");
   await expectFits(admin, "thanks");
+  // leaders hear it at once through their feed; everybody else on their next (slow) check: here they wake up
+  for (const p of players) await wakeUp(p.page);
   for (const p of players) await expect(p.page.getByText("Играта приключи.")).toBeVisible({ timeout: 15_000 });
   const after = await api.state();
   expect(after.game.status).toBe("finished");
@@ -466,6 +497,107 @@ async function expectNoHorizontalScroll(page: Page) {
   const m = await page.evaluate(() => ({ sw: document.documentElement.scrollWidth, iw: window.innerWidth }));
   expect(m.sw).toBeLessThanOrEqual(m.iw + 1);
 }
+
+// ───────────── 2b. what a leader's phone shows while the others speak ─────────────
+
+test("leader phones: first-group note, one-minute warning, your turn, active question, projector next-up", async ({ browser, request }) => {
+  test.setTimeout(180_000);
+  const api = new Admin(request);
+  const Q = ["Първи?", "Втори?", "Трети?"];
+  await api.setup({ teams: TEAMS, questions: Q, speak: 64, pause: 1, reveal: 1, scroll: 1 });
+  await api.ok("start");
+  const players: Player[] = [];
+  for (const n of ["Ана", "Борис", "Виктор"]) players.push(await signUp(browser, n));
+
+  // step 1: the draw; the phones of the leaders connect (here: they wake up) and the admin sees them
+  await api.ok("assign");
+  for (const p of players) await wakeUp(p.page);
+  await expect.poll(async () => (await api.state()).assignments.filter((a) => a.connected).length, { timeout: 15_000 }).toBe(3);
+  await api.ok("advance", { action: "start-picking" });
+
+  // 3 teams with one player each, 3 questions: one leader per question
+  const st = await api.state();
+  const lead = (i: number) => st.assignments.find((a) => a.questionId === st.questions[i].id)!;
+  const phone = (i: number) => players.find((p) => p.code === lead(i).userCode)!;
+  const [l1, l2, l3] = [phone(0), phone(1), phone(2)];
+  const cue = (p: Player) => p.page.getByTestId("cue-popup");
+  const gotIt = (p: Player) => p.page.getByTestId("takeover").getByRole("button", { name: "Разбрах" });
+
+  // revealed one by one: only the first group is told to head for the stage
+  await api.ok("reveal", { assignmentId: lead(0).id });
+  await expect(l1.page.getByTestId("takeover")).toBeVisible({ timeout: 8_000 });
+  await expect(l1.page.getByTestId("takeover-first")).toContainText("първата група");
+  await expect(l1.page.getByTestId("takeover-first")).toContainText("Тръгни към сцената");
+  await shot(l1.page, "leader-first-group");
+  await gotIt(l1).click();
+  await api.ok("advance", { action: "next-pick", qIndex: 0 });
+  await api.ok("reveal", { assignmentId: lead(1).id });
+  await expect(l2.page.getByTestId("takeover")).toBeVisible({ timeout: 8_000 });
+  await expect(l2.page.getByTestId("takeover-first")).toHaveCount(0);
+  await expect(l2.page.getByTestId("takeover")).toContainText("Дръж екрана включен");
+  await gotIt(l2).click();
+  await api.ok("advance", { action: "next-pick", qIndex: 1 });
+  await api.ok("reveal", { assignmentId: lead(2).id });
+  await expect(l3.page.getByTestId("takeover")).toBeVisible({ timeout: 8_000 });
+  await gotIt(l3).click();
+  await api.ok("advance", { action: "next-pick", qIndex: 2 });
+  await expect(l1.page.getByTestId("leader-status")).toContainText("Дръж екрана включен"); // presentation not started
+
+  // the presentation starts: Q1's leader is on
+  await api.ok("advance", { action: "start-presentation" });
+  await expect(cue(l1)).toBeVisible({ timeout: 10_000 });
+  await expect(cue(l1)).toHaveAttribute("data-cue", "now");
+  await expect(cue(l1)).toContainText("Твой ред е!");
+  await shot(l1.page, "leader-your-turn");
+  await cue(l1).getByRole("button").click();
+  await expect(cue(l1)).toBeHidden();
+  // the question that is on right now is marked on every leader's list
+  for (const l of [l1, l2, l3]) await expect(l.page.locator('[data-active="true"]')).toContainText("Първи?");
+
+  // Q2's leader: more than a minute to go, so no popup yet ...
+  await expect(cue(l2)).toHaveCount(0);
+  await expect(l2.page.getByTestId("leader-status")).toContainText(/след около \d:\d\d/);
+  // ... and the stage shows who is next from the last minute on
+  const { context: adminCtx, page: admin } = await adminPage(browser);
+  await expect(admin.getByTestId("presenting")).toBeVisible();
+  await expect(admin.getByTestId("next-up")).toContainText(`Следват В2: ${lead(1).userName}`, { timeout: 15_000 });
+  await expectFits(admin, "presenting");
+  await shot(admin, "projector-next-up");
+  // ... the warning reaches the phone at the same moment
+  await expect(cue(l2)).toHaveAttribute("data-cue", "warn", { timeout: 15_000 });
+  await expect(cue(l2)).toContainText("След по-малко от минута");
+  await shot(l2.page, "leader-warning");
+  await cue(l2).getByRole("button", { name: "Тръгвам" }).click();
+  await expect(cue(l2)).toBeHidden();
+  await expect(cue(l3)).toHaveCount(0); // two questions away: nothing to say
+
+  // the admin skips the rest of Q1: Q2's leader is on (the warning does not come back), Q1's is thanked
+  await api.ok("advance", { action: "next", qIndex: 0 });
+  await expect(cue(l2)).toHaveAttribute("data-cue", "now", { timeout: 10_000 });
+  await cue(l2).getByRole("button").click();
+  await expect(l1.page.getByTestId("leader-status")).toContainText("приключи");
+  await expect(cue(l1)).toHaveCount(0);
+  for (const l of [l1, l2, l3]) await expect(l.page.locator('[data-active="true"]')).toContainText("Втори?");
+
+  // skipping Q2 at once: Q3's leader never got a warning and is simply told it is their turn
+  await api.ok("advance", { action: "next", qIndex: 1 });
+  await expect(cue(l3)).toHaveAttribute("data-cue", "now", { timeout: 10_000 });
+  await cue(l3).getByRole("button").click();
+  // a reload does not bring dismissed popups back
+  await l3.page.reload();
+  await expect(l3.page.getByTestId("leader-bar")).toBeVisible();
+  await expect(l3.page.locator('[data-active="true"]')).toContainText("Трети?");
+  await sleep(1500);
+  await expect(cue(l3)).toHaveCount(0);
+
+  // the last question ends the game: every phone is told, at once for the leaders
+  await api.ok("advance", { action: "next", qIndex: 2 });
+  for (const p of players) await expect(p.page.getByText("Играта приключи.")).toBeVisible({ timeout: 20_000 });
+
+  for (const p of players) await p.context.close();
+  await adminCtx.close();
+  await api.clean();
+});
 
 // ───────────── 3. things going wrong in the middle of the show ─────────────
 
@@ -498,8 +630,11 @@ test("chaos: reloads, double clicks, network loss and a flaky admin tab", async 
 
   // admin: assign, then hammer reload in the middle of picking
   const { context: adminCtx, page: admin } = await adminPage(browser);
-  await expect(admin.getByRole("button", { name: "Определи лидери" })).toBeEnabled();
-  await admin.getByRole("button", { name: "Определи лидери" }).dblclick(); // double click: one assignment only
+  await expect(admin.getByTestId("assign")).toBeEnabled();
+  await admin.getByTestId("assign").dblclick(); // double click: one draw only
+  await expect(admin.getByTestId("start-picking")).toBeVisible();
+  expect((await api.state()).assignments).toHaveLength(4);
+  await admin.getByTestId("start-picking").dblclick(); // double click: the show starts once
   await expect(admin.getByTestId("picking")).toBeVisible();
   expect((await api.state()).assignments).toHaveLength(4);
   for (let i = 0; i < 3; i++) {
@@ -553,7 +688,7 @@ test("picker: every drum has 7 names and stops exactly on the chosen leader; the
   const api = new Admin(request);
   await api.setup({ teams: ["А", "Б", "В", "Г", "Д", "Е"], questions: ["Първи въпрос?", "Втори въпрос?"], speak: 60, pause: 3, reveal: 1, scroll: 2 });
   await api.ok("start", { simulate: true });
-  await api.ok("assign");
+  await api.draw();
   const draw = await api.state();
   const q1 = draw.assignments.filter((a) => a.questionId === draw.questions[0].id).sort((a, b) => a.slot - b.slot);
   expect(q1).toHaveLength(3);
@@ -645,7 +780,7 @@ test("skip: the wait between questions and the speaking timer can be skipped, sa
   await api.setup({ teams: ["А", "Б", "В", "Г"], questions: ["Първи въпрос?", "Втори въпрос?"], speak: 90, pause: 40, reveal: 1, scroll: 1 });
   await api.ok("start", { simulate: true });
   const { context, page } = await adminPage(browser);
-  await page.getByRole("button", { name: "Определи лидери" }).click();
+  await startShow(page);
   await expect(page.getByTestId("picking")).toBeVisible();
   await expect(page.getByTestId("picking-question")).toHaveText("Първи въпрос?");
 
@@ -718,8 +853,18 @@ test("stop presentation: back to the game board from the picking, results and pr
   const stop = page.getByTestId("stop-presentation");
   const board = page.getByText("Играта тече");
 
+  // 0. drawn, show not started: the board offers to throw the draw away
+  await page.getByTestId("assign").click();
+  await expect(page.getByTestId("assigned-status")).toContainText("Лидерите са назначени");
+  await expect(page.getByTestId("leaders-connected")).toHaveText("0");
+  expect((await api.state()).assignments).toHaveLength(4);
+  await page.getByTestId("unassign").click();
+  await expect(page.getByTestId("assign")).toBeVisible();
+  await expect(page.getByTestId("assigned-status")).toHaveCount(0);
+  expect((await api.state()).assignments).toHaveLength(0);
+
   // 1. while the draw is running
-  await page.getByRole("button", { name: "Определи лидери" }).click();
+  await startShow(page);
   await expect(page.getByTestId("picking")).toBeVisible();
   await expect(stop).toBeVisible();
   await expect(page.getByRole("button", { name: "Изход" })).toBeVisible(); // still next to it
@@ -742,7 +887,7 @@ test("stop presentation: back to the game board from the picking, results and pr
   await expect(page.getByTestId("player-count")).toHaveText("100");
 
   // 2. a new draw runs through to the results, and stops there
-  await page.getByRole("button", { name: "Определи лидери" }).click();
+  await startShow(page);
   await expect(page.getByTestId("results")).toBeVisible({ timeout: 60_000 });
   await stop.click();
   await page.getByTestId("confirm-stop").click();
@@ -750,7 +895,7 @@ test("stop presentation: back to the game board from the picking, results and pr
   expect((await api.state()).assignments).toHaveLength(0);
 
   // 3. ... and while a question is being presented
-  await page.getByRole("button", { name: "Определи лидери" }).click();
+  await startShow(page);
   await expect(page.getByTestId("results")).toBeVisible({ timeout: 60_000 });
   await page.getByTestId("start-presentation").click();
   await expect(page.getByTestId("presenting")).toBeVisible();
@@ -763,8 +908,8 @@ test("stop presentation: back to the game board from the picking, results and pr
   expect(s.assignments).toHaveLength(0);
   expect(s.playerCount).toBe(100);
   // the board is fully usable again: the draw can be made once more
-  await expect(page.getByRole("button", { name: "Определи лидери" })).toBeEnabled();
-  await page.getByRole("button", { name: "Определи лидери" }).click();
+  await expect(page.getByTestId("assign")).toBeEnabled();
+  await startShow(page);
   await expect(page.getByTestId("picking")).toBeVisible();
 
   await context.close();
@@ -779,7 +924,7 @@ test("presentation screen: at most 5 speakers per row, narrow badges, the code c
   await api.ok("start");
   const names = ["Александра-Константина Петрова-Иванова", "Ив", "Ж", "Христофор Христофоров", "Ана-Мария", "Борислав", "Цветелина", "Гергана", "Владислав", "Мария"];
   for (let i = 0; i < 20; i++) await join(request, names[i % names.length].slice(0, 30));
-  await api.ok("assign");
+  await api.draw();
   const s = await api.state();
   for (const a of s.assignments) await api.ok("reveal", { assignmentId: a.id });
   await api.ok("advance", { action: "next-pick", qIndex: 0 });
@@ -845,7 +990,7 @@ for (const size of [
     for (let i = 0; i < 24; i++) await join(request, names[i % names.length].slice(0, 30));
 
     const { context, page } = await adminPage(browser, size);
-    await page.getByRole("button", { name: "Определи лидери" }).click();
+    await startShow(page);
     await expect(page.getByTestId("picking")).toBeVisible();
     // Q1 has 4 of 8 slots; check at several moments of the show
     for (let i = 0; i < 6; i++) {

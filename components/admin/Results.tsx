@@ -67,7 +67,7 @@ export function Results({ ctx }: { ctx: Ctx }) {
                   className="mt-[0.6vh] font-semibold leading-snug [overflow-wrap:anywhere]"
                   style={size(q.text.length > 140 ? 2.1 : 2.6)}
                 >
-                  {q.text}aaaa
+                  {q.text}
                 </p>
                 <ul className="m-0 mt-[1.6vh] flex list-none flex-col gap-[1vh] p-0">
                   {speakers.map((s) => (

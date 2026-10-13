@@ -1,6 +1,9 @@
 // Browser-only helpers.
 export const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+/** Random delay in [minMs, maxMs): phones that did the same thing at the same moment must not stay in step. */
+export const jitter = (minMs: number, maxMs: number) => minMs + Math.random() * (maxMs - minMs);
+
 export function storageGet(key: string): string | null {
   try {
     return localStorage.getItem(key);

@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { Admin, Stream, headers, join, sleep } from "./helpers";
+import { Admin, Stream, headers, join, me, sleep, streamStatus } from "./helpers";
 
 const external = !!process.env.BASE_URL;
 
@@ -142,6 +142,18 @@ test.describe("API: concurrency and load (100 players)", () => {
     const s = await admin.state();
     expect(s.playerCount).toBe(100);
     expect(s.teams.map((t) => t.members.length)).toEqual([25, 25, 25, 25]);
+    // a sign-up is one request: the answer already holds the player's whole home screen
+    const teamOf = new Map(s.teams.flatMap((t) => t.members.map((m) => [m.code, t.name] as const)));
+    for (const r of results) {
+      const snap = r.body.snapshot;
+      expect(snap.gameId).toBe(r.body.gameId);
+      expect(snap.user.code).toBe(r.body.code);
+      expect(snap.user.team).toBe(teamOf.get(r.body.code));
+      expect(snap.questions.map((q: { n: number }) => q.n)).toEqual([1, 2]);
+      expect(snap.phase).toEqual({ assigned: false, leader: false });
+      expect(snap.leader).toBeNull();
+      expect(snap.feed).toBeNull();
+    }
     // round-robin by sign-up order, no matter how the requests interleaved
     const sizes = s.teams.map((t) => t.members.length);
     expect(Math.max(...sizes) - Math.min(...sizes)).toBe(0);
@@ -181,68 +193,215 @@ test.describe("API: concurrency and load (100 players)", () => {
     expect(await (await request.get(`/api/me?code=${me.body.code}&gid=${me.body.gameId}`)).json()).toEqual({ live: false });
   });
 
-  test("100 live SSE streams: everyone gets a snapshot; a reveal reaches only its leader", async ({ request, baseURL }) => {
+  test("100 players, 2-step leader flow: only the leaders get a live feed; a reveal reaches only its leader", async ({ request, baseURL }) => {
     const admin = new Admin(request);
     await admin.setup({ teams: ["Червени", "Сини", "Зелени", "Жълти"], questions: ["В1", "В2"] });
     await admin.ok("start");
     const joined = await Promise.all(Array.from({ length: 100 }, (_, i) => join(request, `Играч ${i + 1}`)));
     const gid = joined[0].body.gameId as number;
 
-    const streams = await Promise.all(joined.map((j) => new Stream(baseURL!, j.body.code, gid).open()));
-    try {
-      const t0 = Date.now();
-      await Promise.all(streams.map((s) => s.waitFor((d) => d.live && d.user, 15_000)));
-      const connectMs = Date.now() - t0;
-      console.log(`  100 streams connected and delivered a snapshot in ${connectMs} ms`);
-      for (const s of streams) {
-        expect(s.last.user.code).toBe(s.code);
-        expect(s.last.leader).toBeNull();
-        expect(s.last.questions).toHaveLength(2);
-      }
+    // before the draw nobody has a feed: every phone gets 204 (EventSource stops) and just polls now and then
+    const t0 = Date.now();
+    const before = await Promise.all(joined.map((j) => streamStatus(baseURL!, j.body.code, gid)));
+    console.log(`  100 feed requests answered in ${Date.now() - t0} ms`);
+    expect(new Set(before)).toEqual(new Set([204]));
+    for (const j of joined.slice(0, 5)) expect((await me(request, j.body.code, gid)).phase).toEqual({ assigned: false, leader: false });
 
-      await admin.ok("assign");
-      const st = await admin.state();
-      expect(st.assignments).toHaveLength(4);
-      // before any reveal nobody knows anything
-      await sleep(1800);
-      for (const s of streams) expect(s.last.leader).toBeNull();
+    // step 1: the draw is stored, the stage does not move, nothing is revealed
+    expect((await admin.advance("start-picking")).status()).toBe(409); // no draw yet
+    await admin.ok("assign");
+    const st = await admin.state();
+    expect(st.game.stage).toBe("lobby");
+    expect(st.assignments).toHaveLength(4);
+    expect(st.assignments.every((a) => !a.revealed && !a.connected)).toBe(true);
+    const leaderCodes = new Set(st.assignments.map((a) => a.userCode));
+
+    const snaps = await Promise.all(joined.map((j) => me(request, j.body.code, gid)));
+    snaps.forEach((snap, i) => {
+      const isLeader = leaderCodes.has(joined[i].body.code);
+      expect(snap.phase, `player ${joined[i].body.code}`).toEqual({ assigned: true, leader: isLeader });
+      expect(snap.leader).toBeNull(); // not revealed: no question, no team text
+      expect(snap.feed === null).toBe(!isLeader);
+    });
+
+    // only leaders can open the feed; everybody else is told 204
+    const leaders = joined.filter((j) => leaderCodes.has(j.body.code));
+    const others = joined.filter((j) => !leaderCodes.has(j.body.code));
+    expect(leaders).toHaveLength(4);
+    const refused = await Promise.all(others.map((j) => streamStatus(baseURL!, j.body.code, gid)));
+    expect(new Set(refused)).toEqual(new Set([204]));
+
+    const streams = await Promise.all(leaders.map((j) => new Stream(baseURL!, j.body.code, gid, true).open()));
+    try {
+      await Promise.all(streams.map((x) => x.waitFor((d) => d.live && d.user, 8_000)));
+      for (const x of streams) {
+        expect(x.last.phase).toEqual({ assigned: true, leader: true });
+        expect(x.last.leader).toBeNull();
+        expect(x.last.feed).toMatchObject({ stage: "lobby", questionCount: 2, speakSeconds: 180 });
+        expect(typeof x.last.feed.serverNow).toBe("number");
+      }
+      // presence: the admin sees the connected leaders
+      for (const end = Date.now() + 5_000; Date.now() < end; await sleep(200)) {
+        if ((await admin.state()).assignments.every((a) => a.connected)) break;
+      }
+      expect((await admin.state()).assignments.every((a) => a.connected)).toBe(true);
+
+      // step 2: the show starts; the stage change reaches the leaders' feed (not through game.ver)
+      await admin.ok("advance", { action: "start-picking" });
+      await Promise.all(streams.map((x) => x.waitFor((d) => d.feed?.stage === "picking", 8_000)));
+      for (const x of streams) expect(x.last.leader).toBeNull();
 
       const target = st.assignments[0];
       const mark = Date.now();
       await admin.ok("reveal", { assignmentId: target.id });
-      const hit = streams.find((s) => s.code === target.userCode)!;
+      const hit = streams.find((x) => x.code === target.userCode)!;
       await hit.waitFor((d) => d.leader !== null, 8_000);
-      console.log(`  reveal -> leader's stream updated in ${Date.now() - mark} ms`);
+      console.log(`  reveal -> leader's feed updated in ${Date.now() - mark} ms`);
       expect(hit.last.leader.n).toBe(st.questions.findIndex((q) => q.id === target.questionId) + 1);
       expect(hit.last.leader.team).toBe(target.teamName);
+      expect(hit.last.leader.slot).toBe(target.slot);
 
       await sleep(1800);
-      for (const s of streams) {
-        if (s !== hit) expect(s.last.leader, `player ${s.code} must not be notified`).toBeNull();
+      for (const x of streams) {
+        if (x !== hit) expect(x.last.leader, `player ${x.code} must not be notified`).toBeNull();
       }
     } finally {
-      streams.forEach((s) => s.close());
+      streams.forEach((x) => x.close());
       await admin.post("advance", { action: "reset" });
     }
   });
 
-  test("a moved player is told live about the new team", async ({ request, baseURL }) => {
+  test("a moved player sees the new team on the next check; non-leaders have no live feed", async ({ request, baseURL }) => {
     const admin = new Admin(request);
     await admin.setup({ teams: ["Алфа", "Бета"], questions: ["В1"] });
     await admin.ok("start");
-    const me = await join(request, "Петър");
-    const stream = await new Stream(baseURL!, me.body.code, me.body.gameId).open();
+    const me1 = await join(request, "Петър");
     try {
-      await stream.waitFor((d) => d.user?.team === "Алфа");
+      expect(await streamStatus(baseURL!, me1.body.code, me1.body.gameId)).toBe(204);
+      expect(me1.body.snapshot.user.team).toBe("Алфа");
       const s = await admin.state();
       const beta = s.teams.find((t) => t.name === "Бета")!;
       const user = s.teams[0].members[0];
       await admin.ok("move", { userId: user.id, teamId: beta.id });
-      await stream.waitFor((d) => d.user?.team === "Бета", 8_000);
+      expect((await me(request, me1.body.code, me1.body.gameId)).user.team).toBe("Бета");
+    } finally {
+      await admin.post("advance", { action: "reset" });
+    }
+  });
+
+  test("the two admin steps: assign stores the draw, start-picking needs it, unassign throws it away", async ({ request }) => {
+    const admin = new Admin(request);
+    await admin.setup({ teams: ["A", "B", "C"], questions: ["Q1", "Q2"] });
+    await admin.ok("start");
+    const joined = await Promise.all(Array.from({ length: 6 }, (_, i) => join(request, `Играч ${i + 1}`)));
+    const gid = joined[0].body.gameId as number;
+
+    const noDraw = await admin.advance("start-picking");
+    expect(noDraw.status()).toBe(409);
+    expect((await noDraw.json()).error).toContain("присвои");
+    expect((await admin.advance("unassign")).status()).toBe(409); // nothing to throw away
+
+    await admin.ok("assign");
+    const dup = await admin.post("assign");
+    expect(dup.status()).toBe(409);
+    expect((await dup.json()).error).toContain("вече са присвоени");
+    let s = await admin.state();
+    expect(s.game.stage).toBe("lobby");
+    expect(s.assignments).toHaveLength(3);
+    // a draw can be thrown away and made again (people may be moved first)
+    expect((await admin.advance("unassign")).status()).toBe(200);
+    s = await admin.state();
+    expect(s.assignments).toHaveLength(0);
+    for (const j of joined) expect((await me(request, j.body.code, gid)).phase).toEqual({ assigned: false, leader: false });
+    await admin.ok("assign");
+    s = await admin.state();
+    expect(s.assignments).toHaveLength(3);
+
+    // a leader's slow check counts as "connected"; a plain player's does not touch anything
+    const lead = s.assignments[0];
+    const plain = joined.find((j) => !s.assignments.some((a) => a.userCode === j.body.code))!;
+    await me(request, plain.body.code, gid);
+    expect((await admin.state()).assignments.some((a) => a.connected)).toBe(false);
+    expect((await me(request, lead.userCode, gid)).phase.leader).toBe(true);
+    s = await admin.state();
+    expect(s.assignments.filter((a) => a.connected).map((a) => a.userCode)).toEqual([lead.userCode]);
+
+    // someone who joins after the draw is never a leader, and moving non-leaders stays possible
+    const late = await join(request, "Закъснял");
+    expect(late.body.snapshot.phase).toEqual({ assigned: true, leader: false });
+    const plainTeam = s.teams.find((t) => t.members.some((m) => m.code === plain.body.code))!;
+    const plainUser = plainTeam.members.find((m) => m.code === plain.body.code)!;
+    const target = s.teams.find((t) => t.id !== plainTeam.id)!;
+    expect((await admin.post("move", { userId: plainUser.id, teamId: target.id })).status()).toBe(200);
+    // but the leaders stay put
+    const other = s.teams.find((t) => t.id !== lead.teamId)!;
+    expect((await admin.post("move", { userId: lead.userId, teamId: other.id })).status()).toBe(409);
+
+    // the draw cannot be thrown away once the show has started (stop-presentation does that)
+    await admin.ok("advance", { action: "start-picking" });
+    expect((await admin.advance("unassign")).status()).toBe(409);
+    expect((await admin.post("assign")).status()).toBe(409);
+    expect((await admin.advance("start-picking")).status()).toBe(409);
+    await admin.post("advance", { action: "reset" });
+  });
+
+  test("the leader feed follows the whole show: reveal, questions, timer, stop", async ({ request, baseURL }) => {
+    const admin = new Admin(request);
+    await admin.setup({ teams: ["A", "B"], questions: ["Q1", "Q2"], pause: 1, speak: 90 });
+    await admin.ok("start");
+    const joined = await Promise.all([join(request, "Един"), join(request, "Два")]);
+    const gid = joined[0].body.gameId as number;
+    await admin.draw();
+    let s = await admin.state();
+    const lead = s.assignments.find((a) => a.questionId === s.questions[1].id)!; // presents Q2
+    const stream = await new Stream(baseURL!, lead.userCode, gid, true).open();
+    try {
+      await stream.waitFor((d) => d.feed?.stage === "picking");
+      for (const a of s.assignments) await admin.ok("reveal", { assignmentId: a.id });
+      await stream.waitFor((d) => d.leader?.n === 2);
+      await admin.ok("advance", { action: "next-pick", qIndex: 0 });
+      await stream.waitFor((d) => d.feed?.qIndex === 1 && d.feed?.stage === "picking");
+      await admin.ok("advance", { action: "next-pick", qIndex: 1 });
+      await stream.waitFor((d) => d.feed?.stage === "results");
+      await admin.ok("advance", { action: "start-presentation" });
+      const started = await stream.waitFor((d) => d.feed?.stage === "presenting" && d.feed?.qIndex === 0);
+      expect(started.data.feed.timerStartedAt).toBeGreaterThan(0);
+      expect(started.data.feed.speakSeconds).toBe(90);
+      const t1 = started.data.feed.timerStartedAt;
+      await sleep(1100);
+      // "next" does not touch game.ver, yet the feed must carry the new question and the restarted clock
+      await admin.ok("advance", { action: "next", qIndex: 0 });
+      const second = await stream.waitFor((d) => d.feed?.qIndex === 1 && d.feed?.stage === "presenting");
+      expect(second.data.feed.timerStartedAt).toBeGreaterThan(t1);
+      // stopping throws the draw away: the phone is told it is no leader any more, then the feed ends
+      const seen = stream.snapshots.length;
+      await admin.ok("advance", { action: "stop-presentation" });
+      let after: (typeof stream.snapshots)[number] | undefined;
+      for (const end = Date.now() + 8_000; !after && Date.now() < end; await sleep(50)) {
+        after = stream.snapshots.slice(seen).find((x) => x.data.phase?.leader === false);
+      }
+      expect(after, "a snapshot that says: no draw").toBeTruthy();
+      expect(after!.data.leader).toBeNull();
+      expect(after!.data.feed).toBeNull();
+      for (const end = Date.now() + 5_000; !stream.closed && Date.now() < end; await sleep(50));
+      expect(stream.closed).toBe(true);
     } finally {
       stream.close();
       await admin.post("advance", { action: "reset" });
     }
+  });
+
+  test("the feed refuses what it should: bad code 400, unknown code or stale game 204", async ({ request, baseURL }) => {
+    const admin = new Admin(request);
+    await admin.setup({ teams: ["A", "B"], questions: ["Q1"] });
+    expect(await streamStatus(baseURL!, 123, 1)).toBe(204); // no game running
+    await admin.ok("start");
+    const j = await join(request, "Един");
+    expect((await request.get("/api/stream?code=12")).status()).toBe(400);
+    expect(await streamStatus(baseURL!, j.body.code === 999 ? 998 : 999, j.body.gameId)).toBe(204); // nobody has this code
+    await admin.draw();
+    expect(await streamStatus(baseURL!, j.body.code, j.body.gameId + 1)).toBe(204); // a leader of another game
+    await admin.post("advance", { action: "reset" });
   });
 
   test("streams close themselves and a reconnect still sees the state (nothing can be missed)", async ({ request, baseURL }) => {
@@ -252,7 +411,7 @@ test.describe("API: concurrency and load (100 players)", () => {
     await admin.ok("start");
     const joined = await Promise.all([join(request, "Един"), join(request, "Два")]);
     const gid = joined[0].body.gameId as number;
-    await admin.ok("assign");
+    await admin.draw();
     const st = await admin.state();
     const first = new Stream(baseURL!, joined[0].body.code, gid);
     await first.open();
@@ -285,11 +444,16 @@ test.describe("API: concurrency and load (100 players)", () => {
     expect(starts.map((r) => r.status()).sort()).toEqual([200, 409, 409]);
     await Promise.all(Array.from({ length: 12 }, (_, i) => join(request, `P${i}`)));
 
-    // assign three times at once: exactly one wins, and there are exactly 3 assignments
+    // assign three times at once: exactly one wins, and there are exactly 3 assignments (stage unchanged)
     const assigns = await Promise.all([admin.post("assign"), admin.post("assign"), admin.post("assign")]);
     expect(assigns.map((r) => r.status()).sort()).toEqual([200, 409, 409]);
     let s = await admin.state();
     expect(s.assignments).toHaveLength(3);
+    expect(s.game.stage).toBe("lobby");
+    // start the show three times at once: exactly one wins
+    const starts2 = await Promise.all([1, 2, 3].map(() => admin.advance("start-picking")));
+    expect(starts2.map((r) => r.status()).sort()).toEqual([200, 409, 409]);
+    s = await admin.state();
     expect(s.game.stage).toBe("picking");
 
     // can't skip a question while someone is unrevealed
@@ -341,12 +505,18 @@ test.describe("API: concurrency and load (100 players)", () => {
     const joined = await Promise.all(Array.from({ length: 6 }, (_, i) => join(request, `Играч ${i + 1}`)));
     const gid = joined[0].body.gameId as number;
 
-    // stage 1: picking, with one leader already revealed on a phone
+    // stage 0: drawn but the show has not started: nothing to stop, the draw can be thrown away
     await admin.ok("assign");
+    expect((await admin.advance("stop-presentation")).status()).toBe(409);
+    expect((await admin.advance("unassign")).status()).toBe(200);
+    expect((await admin.state()).assignments).toHaveLength(0);
+
+    // stage 1: picking, with one leader already revealed on a phone
+    await admin.draw();
     let s = await admin.state();
     expect(s.game.stage).toBe("picking");
     const lead = s.assignments[0];
-    const stream = await new Stream(baseURL!, lead.userCode, gid).open();
+    const stream = await new Stream(baseURL!, lead.userCode, gid, true).open();
     try {
       await admin.ok("reveal", { assignmentId: lead.id });
       await stream.waitFor((d) => d.leader?.assignmentId === lead.id);
@@ -367,6 +537,7 @@ test.describe("API: concurrency and load (100 players)", () => {
       }
       expect(after, "a new snapshot without the leader notice").toBeTruthy();
       expect(after!.data.user.code).toBe(lead.userCode);
+      expect(after!.data.phase).toEqual({ assigned: false, leader: false });
     } finally {
       stream.close();
     }
@@ -374,7 +545,7 @@ test.describe("API: concurrency and load (100 players)", () => {
     // the old leader can be moved again, and a fresh draw works
     const other = s.teams.find((t) => t.id !== lead.teamId)!;
     expect((await admin.post("move", { userId: lead.userId, teamId: other.id })).status()).toBe(200);
-    await admin.ok("assign");
+    await admin.draw();
     s = await admin.state();
     expect(s.assignments).toHaveLength(3);
     expect(s.assignments.every((a) => !a.revealed)).toBe(true);
@@ -391,7 +562,7 @@ test.describe("API: concurrency and load (100 players)", () => {
     expect(s.assignments).toHaveLength(0);
 
     // stage 3: presenting (timer running)
-    await admin.ok("assign");
+    await admin.draw();
     s = await admin.state();
     for (const q of s.questions) {
       for (const a of s.assignments.filter((x) => x.questionId === q.id)) await admin.ok("reveal", { assignmentId: a.id });
@@ -414,7 +585,7 @@ test.describe("API: concurrency and load (100 players)", () => {
     await admin.setup({ teams: ["A", "B", "C"], questions: ["Q1", "Q2", "Q3"], pause: 1, speak: 120 });
     await admin.ok("start");
     await Promise.all(Array.from({ length: 6 }, (_, i) => join(request, `Играч ${i + 1}`)));
-    await admin.ok("assign");
+    await admin.draw();
     let s = await admin.state();
     for (const q of s.questions) {
       for (const a of s.assignments.filter((x) => x.questionId === q.id)) await admin.ok("reveal", { assignmentId: a.id });
@@ -445,6 +616,7 @@ test.describe("API: concurrency and load (100 players)", () => {
     expect((await admin.post("assign")).status()).toBe(409);
     await join(request, "Втори");
     expect((await admin.post("assign")).status()).toBe(200);
+    expect((await admin.post("assign")).status()).toBe(409); // already drawn
     await admin.post("advance", { action: "reset" });
   });
 

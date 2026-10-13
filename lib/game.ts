@@ -4,7 +4,7 @@ import { isUniqueViolation, retryRead, sql } from "./db";
 import { ApiError } from "./http";
 import { assignLeaders, cleanName } from "./logic";
 import { simulatedNames } from "./simnames";
-import type { AdminState, AdvanceAction, PlayerSnapshot, Stage, Status } from "./types";
+import type { AdminState, AdvanceAction, JoinResult, PlayerSnapshot, Stage, Status } from "./types";
 
 export const MAX_TEAMS = 30;
 export const MAX_QUESTIONS = 30;
@@ -81,15 +81,26 @@ export async function saveSettings(input: Partial<Record<keyof typeof RANGES, nu
 
 // ───────────────────────── players ─────────────────────────
 
-type NewUser = { id: number; code: number; name: string; team_id: number };
+type NewUser = {
+  id: number;
+  code: number;
+  name: string;
+  team_id: number;
+  team: string;
+  game_id: number;
+  assigned: boolean;
+  questions: { id: number; text: string }[] | null;
+};
 
 /**
  * Creates players atomically. One statement: bumps user_seq (row lock serialises concurrent
  * sign-ups, so round-robin stays exact), picks random free 3-digit codes and inserts.
  * A unique violation (two statements picked the same free code) rolls the whole statement
  * back, including the seq bump, and we simply retry.
+ * The same statement returns everything the new player's screen needs (team name, game id and,
+ * on request, the question list), so a sign-up is one request and one SQL statement.
  */
-export async function createUsers(names: string[]): Promise<NewUser[]> {
+export async function createUsers(names: string[], withQuestions = false): Promise<NewUser[]> {
   const s = sql();
   for (let attempt = 0; attempt < 10; attempt++) {
     try {
@@ -108,16 +119,26 @@ export async function createUsers(names: string[]): Promise<NewUser[]> {
              ORDER BY random() LIMIT $2::int
            ) f
          ),
-         nm AS (SELECT name, ord FROM unnest($1::text[]) WITH ORDINALITY AS t(name, ord))
-         INSERT INTO users (code, name, team_id)
-         SELECT free.c, nm.name, tm.id
-         FROM nm
-         JOIN free ON free.ord = nm.ord
-         JOIN g ON true
-         JOIN cnt ON cnt.n > 0
-         JOIN tm ON tm.idx = (g.base + nm.ord - 1) % cnt.n
-         RETURNING id, code, name, team_id`,
-        [names, names.length],
+         nm AS (SELECT name, ord FROM unnest($1::text[]) WITH ORDINALITY AS t(name, ord)),
+         ins AS (
+           INSERT INTO users (code, name, team_id)
+           SELECT free.c, nm.name, tm.id
+           FROM nm
+           JOIN free ON free.ord = nm.ord
+           JOIN g ON true
+           JOIN cnt ON cnt.n > 0
+           JOIN tm ON tm.idx = (g.base + nm.ord - 1) % cnt.n
+           RETURNING id, code, name, team_id
+         )
+         SELECT ins.id, ins.code, ins.name, ins.team_id, t.name AS team,
+           (SELECT game_id FROM game WHERE id = 1) AS game_id,
+           EXISTS (SELECT 1 FROM assignments) AS assigned,
+           CASE WHEN $3::boolean THEN (
+             SELECT coalesce(json_agg(json_build_object('id', q.id, 'text', q.text) ORDER BY q.id), '[]'::json)
+             FROM questions q
+           ) END AS questions
+         FROM ins JOIN teams t ON t.id = ins.team_id`,
+        [names, names.length, withQuestions],
       )) as NewUser[];
       if (rows.length === 0) {
         const [g] = await s`SELECT status FROM game WHERE id = 1`;
@@ -132,13 +153,26 @@ export async function createUsers(names: string[]): Promise<NewUser[]> {
   throw new ApiError(503, ERR.generic);
 }
 
-export async function joinPlayer(rawName: unknown) {
+/** One request, one statement: the response already holds the player's whole home screen. */
+export async function joinPlayer(rawName: unknown): Promise<JoinResult> {
   const name = cleanName(rawName);
   if (!name) throw new ApiError(400, ERR.nameRequired);
   if (name.length > 30) throw new ApiError(400, ERR.nameTooLong);
-  const [user] = await createUsers([name]);
-  const [g] = await sql()`SELECT game_id FROM game WHERE id = 1`;
-  return { code: user.code, gameId: g.game_id as number };
+  const [u] = await createUsers([name], true);
+  return {
+    code: u.code,
+    gameId: u.game_id,
+    snapshot: {
+      live: true,
+      gameId: u.game_id,
+      user: { name: u.name, code: u.code, team: u.team },
+      questions: (u.questions ?? []).map((q, i) => ({ id: q.id, n: i + 1, text: q.text })),
+      leader: null,
+      // A late joiner is never a leader: the draw only covers the players who were there when it ran.
+      phase: { assigned: u.assigned, leader: false },
+      feed: null,
+    },
+  };
 }
 
 export function parseCode(raw: unknown): number {
@@ -160,11 +194,16 @@ export async function playerSnapshot(code: number, gameId: number | null): Promi
   return retryRead(async () => {
     const s = sql();
     const [gameRows, userRows, questionRows] = await s.transaction([
-      s`SELECT status, game_id FROM game WHERE id = 1`,
-      s`SELECT u.name, u.code, t.name AS team, a.id AS aid, q.id AS qid, q.text AS qtext
+      s`SELECT status, game_id, stage, q_index, speak_seconds,
+          (extract(epoch FROM timer_started_at) * 1000)::float8 AS ts,
+          (extract(epoch FROM clock_timestamp()) * 1000)::float8 AS now,
+          EXISTS (SELECT 1 FROM assignments) AS assigned
+        FROM game WHERE id = 1`,
+      s`SELECT u.name, u.code, t.name AS team, a.id AS aid, a.slot, a.revealed_at IS NOT NULL AS revealed,
+          q.id AS qid, q.text AS qtext
         FROM users u
         JOIN teams t ON t.id = u.team_id
-        LEFT JOIN assignments a ON a.user_id = u.id AND a.revealed_at IS NOT NULL
+        LEFT JOIN assignments a ON a.user_id = u.id
         LEFT JOIN questions q ON q.id = a.question_id
         WHERE u.code = ${code}`,
       s`SELECT id, text FROM questions ORDER BY id`,
@@ -174,30 +213,68 @@ export async function playerSnapshot(code: number, gameId: number | null): Promi
     const u = userRows[0];
     if (!u || gameId !== g.game_id) return { live: true, gameId: g.game_id, user: null };
     const questions = questionRows.map((q, i) => ({ id: q.id as number, n: i + 1, text: q.text as string }));
-    const leader = u.aid
-      ? {
-          assignmentId: u.aid as number,
-          n: questions.findIndex((q) => q.id === u.qid) + 1,
-          text: u.qtext as string,
-          team: u.team as string,
-        }
-      : null;
+    // The question and team of a leader stay hidden until the admin screen reveals them; whether a
+    // draw exists for this player is only a yes/no (it tells the phone to open the live feed).
+    const leader =
+      u.aid && u.revealed
+        ? {
+            assignmentId: u.aid as number,
+            n: questions.findIndex((q) => q.id === u.qid) + 1,
+            text: u.qtext as string,
+            team: u.team as string,
+            slot: u.slot as number,
+          }
+        : null;
     return {
       live: true,
       gameId: g.game_id,
       user: { name: u.name, code: u.code, team: u.team },
       questions,
       leader,
+      phase: { assigned: g.assigned as boolean, leader: !!u.aid },
+      feed: u.aid
+        ? {
+            stage: g.stage as Stage,
+            qIndex: g.q_index as number,
+            questionCount: questions.length,
+            timerStartedAt: (g.ts as number | null) ?? null,
+            speakSeconds: g.speak_seconds as number,
+            serverNow: g.now as number,
+          }
+        : null,
     };
   });
 }
 
-/** Cheap change detector for the SSE loop: one tiny query. */
+/** True for a joined player who has a draw (revealed or not): the only players that get a live feed. */
+export function isLeaderSnapshot(snap: PlayerSnapshot): boolean {
+  return snap.live && snap.user !== null && snap.phase.leader;
+}
+
+/** The leader's phone checked in (feed opened, heartbeat, backup poll). Best effort: never breaks a response. */
+export async function touchLeader(code: number): Promise<void> {
+  try {
+    await sql()`UPDATE assignments SET seen_at = now() WHERE user_id = (SELECT id FROM users WHERE code = ${code})`;
+  } catch (err) {
+    console.warn("[touchLeader]", err);
+  }
+}
+
+/**
+ * Cheap change detector for the leader feed: one tiny query. It must cover everything the snapshot
+ * shows: the game's stage/question/timer move without touching `game.ver`.
+ */
 export async function playerVersion(code: number, gameId: number | null): Promise<string> {
   return retryRead(async () => {
-    const [r] = await sql()`SELECT g.status, g.game_id, g.ver AS gver, u.ver AS uver
-      FROM game g LEFT JOIN users u ON u.code = ${code} AND g.game_id = ${gameId} WHERE g.id = 1`;
-    return `${r.status}:${r.game_id}:${r.gver}:${r.uver ?? "x"}`;
+    const [r] = await sql()`SELECT g.status, g.game_id, g.ver AS gver, g.stage, g.q_index,
+        (extract(epoch FROM g.timer_started_at) * 1000)::bigint AS ts,
+        u.ver AS uver, a.id AS aid, a.revealed_at IS NOT NULL AS rev,
+        EXISTS (SELECT 1 FROM assignments) AS assigned
+      FROM game g
+      LEFT JOIN users u ON u.code = ${code} AND g.game_id = ${gameId}
+      LEFT JOIN assignments a ON a.user_id = u.id
+      WHERE g.id = 1`;
+    return [r.status, r.game_id, r.gver, r.stage, r.q_index, r.ts ?? "-", r.uver ?? "x", r.aid ?? "-", r.rev ?? "-", r.assigned].join(":");
   });
 }
 
@@ -245,16 +322,23 @@ export async function moveUser(userId: number, teamId: number) {
   if (rows.length === 0) throw new ApiError(409, ERR.stale);
 }
 
+/**
+ * Step 1 of the leader flow: draw the leaders and store the draw. The stage stays "lobby" (nobody sees
+ * anything yet; phones only learn that a draw exists). Step 2, `start-picking`, opens the projector show.
+ * Atomic: every assignment or none. The UNIQUE team/user columns make a second concurrent draw fail.
+ */
 export async function assignAllLeaders() {
   const s = sql();
-  const [teamRows, userRows, questionRows, gameRows] = await s.transaction([
+  const [teamRows, userRows, questionRows, gameRows, existing] = await s.transaction([
     s`SELECT id FROM teams ORDER BY id`,
     s`SELECT id, team_id FROM users ORDER BY id`,
     s`SELECT id FROM questions ORDER BY id`,
     s`SELECT status, stage FROM game WHERE id = 1`,
+    s`SELECT count(*)::int AS n FROM assignments`,
   ]);
   const g = gameRows[0];
   if (g.status !== "live" || g.stage !== "lobby") throw new ApiError(409, ERR.notLive);
+  if (existing[0].n > 0) throw new ApiError(409, ERR.alreadyAssigned);
   const teams = teamRows.map((t) => ({
     id: t.id as number,
     members: userRows.filter((u) => u.team_id === t.id).map((u) => ({ id: u.id as number })),
@@ -264,17 +348,25 @@ export async function assignAllLeaders() {
     throw new ApiError(409, ERR.notEnoughEligible);
   }
   const draw = assignLeaders(teams, questionIds);
-  // One statement: flip the stage and insert every assignment, or nothing at all.
-  const rows = await s.query(
-    `WITH st AS (
-       UPDATE game SET stage = 'picking', q_index = 0 WHERE id = 1 AND status = 'live' AND stage = 'lobby' RETURNING 1
-     )
-     INSERT INTO assignments (question_id, team_id, user_id, slot)
-     SELECT * FROM unnest($1::int[], $2::int[], $3::int[], $4::int[])
-     WHERE EXISTS (SELECT 1 FROM st) RETURNING id`,
-    [draw.map((d) => d.questionId), draw.map((d) => d.teamId), draw.map((d) => d.userId), draw.map((d) => d.slot)],
-  );
-  if (rows.length !== draw.length) throw new ApiError(409, ERR.stale);
+  try {
+    // A leader who was moved to another team after the read above would make the draw wrong: the join
+    // on users drops that row, the count check below turns it into "stale" and nothing is stored.
+    const rows = await s.query(
+      `INSERT INTO assignments (question_id, team_id, user_id, slot)
+       SELECT d.question_id, d.team_id, d.user_id, d.slot
+       FROM unnest($1::int[], $2::int[], $3::int[], $4::int[]) AS d(question_id, team_id, user_id, slot)
+       JOIN users u ON u.id = d.user_id AND u.team_id = d.team_id
+       WHERE (SELECT status FROM game WHERE id = 1) = 'live'
+         AND (SELECT stage FROM game WHERE id = 1) = 'lobby'
+       RETURNING id`,
+      [draw.map((d) => d.questionId), draw.map((d) => d.teamId), draw.map((d) => d.userId), draw.map((d) => d.slot)],
+    );
+    if (rows.length !== draw.length) throw new ApiError(409, ERR.stale);
+  } catch (err) {
+    // Another click drew first: its rows hold the UNIQUE team/user slots.
+    if (isUniqueViolation(err)) throw new ApiError(409, ERR.alreadyAssigned);
+    throw err;
+  }
 }
 
 /** Admin screen revealed a slot: from now on that player may see their assignment. Idempotent. */
@@ -292,6 +384,27 @@ export async function advance(action: AdvanceAction, qIndex: number | null) {
   const s = sql();
   let ok = false;
   switch (action) {
+    case "start-picking": {
+      // Step 2: open the projector show. Only possible once the draw is stored.
+      const rows = await s`UPDATE game SET stage = 'picking', q_index = 0
+        WHERE id = 1 AND status = 'live' AND stage = 'lobby'
+          AND EXISTS (SELECT 1 FROM assignments) RETURNING id`;
+      ok = rows.length === 1;
+      if (!ok) {
+        const [c] = await s`SELECT EXISTS (SELECT 1 FROM assignments) AS assigned`;
+        if (!c.assigned) throw new ApiError(409, ERR.notAssigned);
+      }
+      break;
+    }
+    case "unassign": {
+      // Throw the stored draw away (before the show) so it can be made again.
+      const rows = await s`WITH st AS (
+          SELECT 1 FROM game WHERE id = 1 AND status = 'live' AND stage = 'lobby'
+        ), da AS (DELETE FROM assignments WHERE EXISTS (SELECT 1 FROM st) RETURNING 1)
+        SELECT count(*)::int AS n FROM da`;
+      ok = rows[0].n > 0;
+      break;
+    }
     case "next-pick": {
       if (qIndex === null) throw new ApiError(400, ERR.badJson);
       const rows = await s`UPDATE game SET
@@ -370,7 +483,8 @@ export async function adminState(): Promise<AdminState> {
       s`SELECT id, name FROM teams ORDER BY id`,
       s`SELECT id, text FROM questions ORDER BY id`,
       s`SELECT id, name, code, team_id FROM users ORDER BY id`,
-      s`SELECT id, question_id, team_id, user_id, slot, revealed_at IS NOT NULL AS revealed
+      s`SELECT id, question_id, team_id, user_id, slot, revealed_at IS NOT NULL AS revealed,
+          (seen_at IS NOT NULL AND seen_at > clock_timestamp() - interval '60 seconds') AS connected
         FROM assignments ORDER BY question_id, slot`,
     ]);
     const g = gameRows[0];
@@ -410,6 +524,7 @@ export async function adminState(): Promise<AdminState> {
         userCode: (userById.get(a.user_id)?.code as number) ?? 0,
         slot: a.slot as number,
         revealed: a.revealed as boolean,
+        connected: a.connected as boolean,
       })),
       playerCount: userRows.length,
     };

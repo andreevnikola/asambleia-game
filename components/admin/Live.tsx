@@ -10,13 +10,16 @@ type Moving = { member: AdminMember; from: AdminTeam; x: number; y: number };
 
 export function Live({ ctx }: { ctx: Ctx }) {
   const { state, call, refresh, logout } = ctx;
-  const { teams, questions, game, playerCount } = state;
+  const { teams, questions, game, playerCount, assignments } = state;
   const [moving, setMoving] = useState<Moving | null>(null);
   const [confirmReset, setConfirmReset] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const eligible = teams.filter((t) => t.members.length > 0).length;
   const canAssign = eligible >= questions.length;
+  // Step 1 stores the draw (phones of the leaders connect); step 2 opens the projector show.
+  const assigned = assignments.length > 0;
+  const connected = assignments.filter((a) => a.connected).length;
 
   useEffect(() => {
     if (!moving) return;
@@ -67,21 +70,55 @@ export function Live({ ctx }: { ctx: Ctx }) {
           </p>
         </div>
         <div className="ml-auto flex items-center gap-4">
-          {!canAssign && (
+          {!assigned && !canAssign && (
             <p className="max-w-[34ch] text-right text-sm font-medium text-signal" data-testid="assign-problem">
               Нужни са поне {questions.length} отбора с участници (сега: {eligible}).
+            </p>
+          )}
+          {assigned && (
+            <p className="max-w-[40ch] text-right text-sm" data-testid="assigned-status">
+              <strong className="text-ink">Лидерите са назначени.</strong> Свързани телефони:{" "}
+              <strong className="tnum text-ink" data-testid="leaders-connected">
+                {connected}
+              </strong>{" "}
+              от <strong className="tnum text-ink">{assignments.length}</strong>
+              {connected < assignments.length && (
+                <span className="block text-ink-soft">Телефоните се свързват до около минута.</span>
+              )}
             </p>
           )}
           <button className="chip-btn danger" disabled={busy} onClick={() => setConfirmReset(true)}>
             Нулирай играта
           </button>
-          <button
-            className="btn btn-lg"
-            disabled={busy || !canAssign}
-            onClick={() => run(() => call("/api/admin/assign"))}
-          >
-            Определи лидери
-          </button>
+          {assigned && (
+            <button
+              className="chip-btn"
+              disabled={busy}
+              onClick={() => run(() => call("/api/admin/advance", { body: { action: "unassign" } }))}
+              data-testid="unassign"
+            >
+              Отмени назначаването
+            </button>
+          )}
+          {assigned ? (
+            <button
+              className="btn btn-lg"
+              disabled={busy}
+              onClick={() => run(() => call("/api/admin/advance", { body: { action: "start-picking" } }))}
+              data-testid="start-picking"
+            >
+              Определи лидери
+            </button>
+          ) : (
+            <button
+              className="btn btn-lg"
+              disabled={busy || !canAssign}
+              onClick={() => run(() => call("/api/admin/assign"))}
+              data-testid="assign"
+            >
+              Назначи лидери
+            </button>
+          )}
         </div>
       </div>
 

@@ -7,7 +7,7 @@ import { SkipIcon } from "@/components/ui/SkipIcon";
 import type { Ctx } from "./types";
 
 /** Header for the projector screens: quiet, so the content is the show. */
-export function StageHeader({ ctx, progress }: { ctx: Ctx; progress?: string }) {
+export function StageHeader({ ctx, progress, middle }: { ctx: Ctx; progress?: string; middle?: React.ReactNode }) {
   const [confirm, setConfirm] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -21,8 +21,15 @@ export function StageHeader({ ctx, progress }: { ctx: Ctx; progress?: string }) 
   }
 
   return (
-    <header className="flex items-center justify-between px-[3vw] pt-[2.4vh]">
+    <header className="relative flex items-center justify-between px-[3vw] pt-[2.4vh]">
       <InteractLogo className="h-[5.5vh] w-auto" />
+      {/* Optional centre slot (the "next up" strip): laid over the middle of the header, so it can never
+          push the logo or the buttons; it truncates instead. */}
+      {middle && (
+        <div className="pointer-events-none absolute inset-x-0 top-[2.4vh] flex h-[5.5vh] items-center justify-center">
+          <div className="flex max-w-[34vw] justify-center">{middle}</div>
+        </div>
+      )}
       <div className="flex items-center gap-[2vw]">
         {progress && <p className="display text-[3.2vh] text-white/80">{progress}</p>}
         <div className="flex items-center gap-[1.2vw]">

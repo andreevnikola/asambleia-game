@@ -45,5 +45,9 @@ CREATE TABLE IF NOT EXISTS assignments (
   team_id     int NOT NULL UNIQUE REFERENCES teams(id) ON DELETE CASCADE,
   user_id     int NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
   slot        int NOT NULL,
-  revealed_at timestamptz
+  revealed_at timestamptz,
+  seen_at     timestamptz
 );
+
+-- Added after the first release: when the leader's phone last checked in (admin sees "connected X of Y").
+ALTER TABLE assignments ADD COLUMN IF NOT EXISTS seen_at timestamptz;

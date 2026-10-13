@@ -62,7 +62,7 @@ export function FitText({
         className={`display w-full [overflow-wrap:anywhere] ${className}`}
         data-testid={testId}
       >
-        {text}a
+        {text}
       </h1>
     </div>
   );

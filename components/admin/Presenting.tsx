@@ -5,7 +5,7 @@ import { Modal } from "@/components/ui/Modal";
 import { SkipIcon } from "@/components/ui/SkipIcon";
 import { FitText, fs, useFit } from "@/components/ui/fit";
 import { useTick } from "@/lib/hooks";
-import { formatClock } from "@/lib/logic";
+import { WARN_MS, formatClock } from "@/lib/logic";
 import { StageHeader } from "./StageHeader";
 import { qLabel, type Ctx } from "./types";
 
@@ -49,6 +49,23 @@ export function Presenting({ ctx }: { ctx: Ctx }) {
   const urgent =
     left <= 10_000 ? "bg-signal" : left <= 30_000 ? "bg-gold" : "bg-azure";
   const rows = Math.ceil(speakers.length / PER_ROW);
+  // From the last minute on, the stage shows who is next (the phones of those leaders get the same warning).
+  const nextQ = questions[game.qIndex + 1];
+  const nextSpeakers = nextQ
+    ? assignments
+        .filter((a) => a.questionId === nextQ.id)
+        .sort((a, b) => a.slot - b.slot)
+    : [];
+  const nextUp =
+    nextSpeakers.length > 0 && left <= WARN_MS ? (
+      <p
+        className="max-w-full truncate rounded-full bg-gold px-[1.4vw] py-[0.7vh] text-[2.5vh] font-semibold leading-tight text-ink"
+        data-testid="next-up"
+      >
+        Следват {qLabel(game.qIndex + 2)}:{" "}
+        {nextSpeakers.map((a) => a.userName).join(" · ")}
+      </p>
+    ) : null;
 
   // Skipping is the same step as "Продължи" after the time is up: the server moves to the next
   // question (or finishes the game) and starts that question's timer from zero. Nothing about the
@@ -73,6 +90,7 @@ export function Presenting({ ctx }: { ctx: Ctx }) {
       <StageHeader
         ctx={ctx}
         progress={`${qLabel(game.qIndex + 1)} от ${questions.length}`}
+        middle={nextUp}
       />
 
       <section
@@ -85,7 +103,7 @@ export function Presenting({ ctx }: { ctx: Ctx }) {
         <FitText
           text={q.text}
           testId="presenting-question"
-          className="text-center"
+          className="text-center pb-10 pt-3"
         />
       </section>
 

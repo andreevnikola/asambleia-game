@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { assignLeaders, cleanName, formatClock, seededRng, teamIndexForSeq } from "../lib/logic";
+import { WARN_MS, assignLeaders, cleanName, formatClock, leaderCue, leaderEtaMs, seededRng, teamIndexForSeq, timerLeftMs } from "../lib/logic";
 import { reelNames, reelTrack } from "../lib/reel";
 
 const mkTeams = (sizes: number[]) =>
@@ -162,5 +162,71 @@ test.describe("leader picker drum", () => {
     const alone = reelNames("Ана", ["Ана"], 9);
     expect(alone.names).toEqual(Array(7).fill("Ана"));
     expect(reelNames("Ана", [], 1).names[reelNames("Ана", [], 1).land]).toBe("Ана");
+  });
+});
+
+test.describe("leader cues", () => {
+  const base = { stage: "presenting", qIndex: 0, myN: 1, timerStartedAt: 1_000_000, speakSeconds: 180, now: 1_000_000 };
+  const at = (secIntoQuestion: number, over: Partial<typeof base> = {}) => ({ ...base, ...over, now: base.timerStartedAt + secIntoQuestion * 1000 });
+
+  test("nothing happens before the presentation", () => {
+    for (const stage of ["lobby", "picking", "results", "finished"]) {
+      expect(leaderCue({ ...base, stage })).toBe("wait");
+      expect(leaderEtaMs({ ...base, stage, myN: 2 })).toBeNull();
+    }
+  });
+
+  test("my question: on while the timer runs, done when it is over", () => {
+    expect(leaderCue(at(0))).toBe("now");
+    expect(leaderCue(at(179.9))).toBe("now");
+    expect(leaderCue(at(180))).toBe("done");
+    expect(leaderCue(at(500))).toBe("done");
+    expect(leaderCue(at(10, { qIndex: 1, myN: 1 }))).toBe("done"); // already spoke
+  });
+
+  test("the question after the current one: warned in its last minute only", () => {
+    const next = { myN: 2 };
+    expect(leaderCue(at(0, next))).toBe("wait");
+    expect(leaderCue(at(119.9, next))).toBe("wait");
+    expect(leaderCue(at(120, next))).toBe("warn"); // 60 s left
+    expect(leaderCue(at(180, next))).toBe("warn"); // time is up, the admin has not continued yet
+    expect(WARN_MS).toBe(60_000);
+  });
+
+  test("further away: wait", () => {
+    expect(leaderCue(at(170, { myN: 3 }))).toBe("wait");
+  });
+
+  test("a speaking time of a minute or less warns from the start of the previous question", () => {
+    expect(leaderCue(at(0, { myN: 2, speakSeconds: 60 }))).toBe("warn");
+    expect(leaderCue(at(0, { myN: 2, speakSeconds: 30 }))).toBe("warn");
+    expect(leaderCue(at(0, { myN: 2, speakSeconds: 61 }))).toBe("wait");
+  });
+
+  test("an admin skip: the cue follows the state, never an event", () => {
+    // Q2's leader was in "wait" (3 minutes to go); the admin skips: Q2 starts with a fresh timer -> on, no warning needed
+    expect(leaderCue(at(0, { qIndex: 1, myN: 2 }))).toBe("now");
+    // Q3's leader after the same skip is two questions away
+    expect(leaderCue(at(0, { qIndex: 1, myN: 3 }))).toBe("wait");
+  });
+
+  test("a phone that connects late gets the right cue at once", () => {
+    expect(leaderCue(at(150, { myN: 2 }))).toBe("warn");
+    expect(leaderCue(at(5, { qIndex: 2, myN: 3 }))).toBe("now");
+    expect(leaderCue(at(5, { qIndex: 3, myN: 3 }))).toBe("done");
+  });
+
+  test("the timer has not started yet: full time left", () => {
+    expect(timerLeftMs(null, 180, 5_000)).toBe(180_000);
+    expect(leaderCue({ ...base, timerStartedAt: null })).toBe("now");
+  });
+
+  test("time until my turn", () => {
+    expect(leaderEtaMs(at(0, { myN: 2 }))).toBe(180_000);
+    expect(leaderEtaMs(at(60, { myN: 2 }))).toBe(120_000);
+    expect(leaderEtaMs(at(60, { myN: 4 }))).toBe(120_000 + 2 * 180_000);
+    expect(leaderEtaMs(at(0, { myN: 1 }))).toBeNull(); // it is my turn
+    expect(leaderEtaMs(at(0, { qIndex: 2, myN: 1 }))).toBeNull(); // past
+    expect(leaderEtaMs(at(500, { myN: 2 }))).toBe(0); // time is up, the admin has not continued
   });
 });

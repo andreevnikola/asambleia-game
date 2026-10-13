@@ -25,6 +25,7 @@ export type StateJson = {
     teamName: string;
     slot: number;
     revealed: boolean;
+    connected: boolean;
   }[];
   playerCount: number;
 };
@@ -46,6 +47,12 @@ export class Admin {
   }
   async advance(action: string, qIndex?: number) {
     return this.post("advance", { action, qIndex });
+  }
+
+  /** Both admin steps: store the draw ("assign"), then open the projector show ("start-picking"). */
+  async draw() {
+    await this.ok("assign");
+    await this.ok("advance", { action: "start-picking" });
   }
 
   /** Back to an empty preparation stage (no players, no teams, no questions, default timers). */
@@ -88,7 +95,28 @@ export async function join(req: APIRequestContext, name: string) {
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** Minimal SSE client over fetch (Node). Collects every snapshot the server pushes. */
+/** What a phone gets from the slow check (/api/me). */
+export async function me(req: APIRequestContext, code: number, gameId: number) {
+  const res = await req.get(`/api/me?code=${code}&gid=${gameId}`);
+  expect(res.status()).toBe(200);
+  return res.json();
+}
+
+/** Opens the live feed and returns its HTTP status (204 for everyone who is not a leader). */
+export async function streamStatus(baseURL: string, code: number, gameId: number) {
+  const ctl = new AbortController();
+  const res = await fetch(`${baseURL}/api/stream?code=${code}&gid=${gameId}`, { signal: ctl.signal });
+  const status = res.status;
+  ctl.abort();
+  await res.body?.cancel().catch(() => {});
+  return status;
+}
+
+/**
+ * Minimal SSE client over fetch (Node). Collects every snapshot the server pushes.
+ * With `auto` it reconnects like EventSource does when the server ends the stream (the tests run with a
+ * very short SSE_MAX_MS); a 204 answer ends it for good, as it does in a browser.
+ */
 export class Stream {
   snapshots: { t: number; data: any }[] = [];
   closed = false;
@@ -99,6 +127,7 @@ export class Stream {
     private baseURL: string,
     readonly code: number,
     readonly gameId: number,
+    private auto = false,
   ) {}
 
   async open() {
@@ -107,8 +136,25 @@ export class Stream {
     });
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/event-stream");
-    this.pump(res);
+    void this.pump(res);
     return this;
+  }
+
+  private async reopen() {
+    try {
+      const res = await fetch(`${this.baseURL}/api/stream?code=${this.code}&gid=${this.gameId}`, {
+        signal: this.ctl.signal,
+      });
+      if (res.status !== 200) {
+        this.closed = true;
+        await res.body?.cancel().catch(() => {});
+        return;
+      }
+      this.closed = false;
+      void this.pump(res);
+    } catch {
+      this.closed = true;
+    }
   }
 
   private async pump(res: Response) {
@@ -133,6 +179,7 @@ export class Stream {
       // aborted
     }
     this.closed = true;
+    if (this.auto && !this.ctl.signal.aborted) setTimeout(() => void this.reopen(), 300);
   }
 
   get last() {

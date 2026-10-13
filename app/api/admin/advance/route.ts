@@ -7,7 +7,16 @@ import { ApiError, json, readBody, toInt } from "@/lib/http";
 import { ERR } from "@/lib/copy";
 import type { AdvanceAction } from "@/lib/types";
 
-const ACTIONS: AdvanceAction[] = ["next-pick", "start-presentation", "stop-presentation", "next", "new-game", "reset"];
+const ACTIONS: AdvanceAction[] = [
+  "start-picking",
+  "unassign",
+  "next-pick",
+  "start-presentation",
+  "stop-presentation",
+  "next",
+  "new-game",
+  "reset",
+];
 
 export const POST = adminRoute(async (req) => {
   const b = await readBody(req);

@@ -34,7 +34,9 @@ test("simulation: 100 players appear, teams are balanced, the whole draw runs wi
   expect(await page.evaluate(() => document.documentElement.scrollHeight <= window.innerHeight + 1)).toBe(true);
 
   // leaders -> picking (no phones are connected) -> results -> presentations -> thanks
-  await page.getByRole("button", { name: "Определи лидери" }).click();
+  await page.getByTestId("assign").click();
+  await expect(page.getByTestId("assigned-status")).toBeVisible();
+  await page.getByTestId("start-picking").click();
   await expect(page.getByTestId("picking")).toBeVisible();
   await expect(page.getByTestId("results")).toBeVisible({ timeout: 60_000 });
   const r = await api.state();
